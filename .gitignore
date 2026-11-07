@@ -1,3 +1,4 @@
 # локальный мусор
 *.swp
 *~
+.local-analysis/
