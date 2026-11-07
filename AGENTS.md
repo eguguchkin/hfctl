@@ -171,16 +171,23 @@ prompt merge_sort md5 `253c7ac5`; свежие процессы ×3.
   ≈ 2–4 нед (переписывать gfx1151 GQA-тайл в includable-body + registry +
   byte-оракели). Блокеры: #1050 в полёте, планка доказательств как в
   #897, sizing 262K partials.
-- **serve.multi_slot** (SCS slot engine, experimental) — работает на
+- **serve.multi_slot** (SCS slot engine, «the legacy route» по SERVE.md, но
+  lifecycle=stable в CONFIG.md и активно развивается — swap-тиры, TTL-sweep,
+  batched head, embeddings; removal не заявлен) — работает на
   gfx1151 c 27B (ядра в паке: `gemv_hfq4g256_multirow_default_mq4v2`,
   `attention_q8_0_flash_prefill_wmma_gfx11_hd256_paged`,
-  `kv_cache_write_q8_0_batched_paged`; DFlash2 draft грузится (slots),
-  B=16), НО: (а) 4 слота×262144 отбиваются OOM-guard'ом (needs 48.7 GiB >
-  MemAvailable 53.75−8 headroom); живой вариант 2×262144; (б) в слот-режиме
-  DFlash не armed («spec: off») — decode AR-уровня 14–31 tok/s; (в)
+  `kv_cache_write_q8_0_batched_paged`), НО: (а) 4 слота×262144 отбиваются
+  OOM-guard'ом (needs 48.7 GiB >
+  MemAvailable 53.75−8 headroom); живой вариант 2×262144; (б) **DFlash в
+  слот-режиме РАБОТАЕТ** (dflash_slot.rs, «DFlash2 draft loaded (slots)»,
+  блок фиксирован 16 — «multi-slot admits only 16»); строка логи «spec: off
+  (no speculator armed)» — артефакт отчёта: на slot-ветке speculator
+  заполняется только для MTP (main.rs:1592); (в)
   агрегат НЕ растёт: 2×250 tok параллельно 27.4 c vs 25.7 c последовательно
   (шина LPDDR делится); (г) тайминги per-request в слот-режиме приходят
-  null. **Вывод: прод остаётся на «serial FIFO + DFlash».**
+  null; (д) смысл рычага — **head-of-line изоляция** (короткий запрос идёт
+  сразу в своём слоте на 15–40 tok/s вместо ожидания всей длинной
+  генерации в FIFO), а не агрегат.
 - **qwen3.8-flash-next на 60 GiB Halo НЕ ВЛЕЗАЕТ**: базовый трук 70.9 GB
   (mq4-xts, min 72 GB) / 59.1 GB (mq3-xts, min 64 GB) должен быть
   полностью резидентным, а всего ~60 GiB единой памяти; offload на APU не
@@ -198,7 +205,29 @@ prompt merge_sort md5 `253c7ac5`; свежие процессы ×3.
 - Current best = **DFlash на serial lane**: серийный DFlash 130.5 tok/s —
   максимум сейчас. Параллелизм API-уровня (N клиентов) работает как
   FIFO-очередь: per-request время растёт пропорционально позиции в очереди
-  (контент не страдает).
+  (контент не страдает). FIFO = **head-of-line блокировка**: SERVE.md прямо
+  зовёт это «known gap» (запрос, пришедший во время singleton-генерации,
+  ждёт её целиком; её TTFT включает чужую генерацию).
+- **gpu-lock ЭКСКЛЮЗИВЕН на карту** (gpu_lock.rs: flock
+  `/run/lock/hipfire/gpu-pci-<bdf>.lock`, «exclusive, non-blocking»;
+  shared-режим только для weight-host). Второй `hipfire serve` на том же
+  GPU получает `Claim::Busy(«already reserved by holder PID …»)` и FATAL.
+  Обход: `HIPFIRE_LOCK_DIR` в разные каталоги («Different directories do
+  not see each other's locks») — unsupported-соседство, каждый процесс
+  видит только свой OOM-бюджет.
+- **Два сервера на одной Halo = две очереди, одна труба.** Веса ×2
+  (~15.6→~31 GB из ~60 GiB; KV стандартного VMM-пути растёт лениво — два
+  сервера с 262144 могут ужиться, проверять admission-цифрами). Агрегат не
+  удваивается (LPDDR одна), зато свободный сервер держит полный singleton
+  DFlash ~130 tok/s.
+- **Prefix-кэша между запросами у нашего маршрута нет**: `/health` даёт
+  `prefix_cache: false`, `prefix_cache_max_bytes: 0`. Есть только
+  session-кэш внутри одного процесса (DeltaNet checkpoint pool;
+  `cached_tokens` 442→1323 в chain-тесте). Следствие для мульти-инстанс:
+  прокси нужен sticky по conversation-id; «префикс уже на сервере Б» для
+  stateless-клиентов не существует — Б всё равно префиллит. Практичная
+  политика — мягкая аффинность с переключением при глубокой очереди
+  (цена = пере-префилл истории, секунды).
 
 ## Скрипты (в этом репозитории)
 
