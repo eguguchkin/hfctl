@@ -688,25 +688,19 @@ cmd_doctor() {  # диагностика без изменений (spec §3): g
 
 cmd_models() {  # что скачано и что требует каждый профиль (spec §3)
   echo "── на диске ($MODELS_DIR) ──"
-  if [ -d "$MODELS_DIR" ]; then
-    du -sh "$MODELS_DIR" 2>/dev/null
-    ls -lh "$MODELS_DIR" 2>/dev/null | awk 'NR>1 {printf "  %-52s %s\n", $NF, $5}' | grep -v '^  \^\?' || true
-  else
-    echo "(каталога нет — ничего не скачано)"
-  fi
-  echo "── профили: что докачать ──"
+  [ -d "$MODELS_DIR" ] && du -sh "$MODELS_DIR" 2>/dev/null || echo "(каталога нет — ничего не скачано)"
+  echo "── профили: доступность и ожидаемая докачка ──"
+  # файлы моделей: тег → имя файла (пуллеру hipfire известны точные имена;
+  # здесь — по префиксу: точный расчёт всегда делает pull при install/use)
   local p have; have=$(ram_pool_gib)
   for p in $PROFILE_LIST; do
-    local need avail="доступен"
-    [ "$have" -ge "$(profile_field "$p" 4)" ] || avail="НЕДОСТУПЕН (RAM ${have} < ${need} GiB)"
-    local missing="" tag
-    for tag in $(profile_field "$p" 2) $(profile_field "$p" 3 | grep -v '^-$'); do
-      # имя файла из тега: hipfire pull кладёт <имя>.<квант>; проверяем по ls диска
-      [ -n "$(ls "$MODELS_DIR" 2>/dev/null | grep -F "$(basename "${tag//-/:}" | head -c 20)" | head -1)" ] || missing="$missing $tag"
-    done
-    echo "  $p [$avail]${missing:+  докачать:$missing}"
+    local need avail
+    need=$(profile_field "$p" 4)
+    if [ "$have" -ge "$need" ]; then avail="доступен"; else avail="НЕДОСТУПЕН (RAM: есть ${have} GiB, нужно ≥${need})"; fi
+    echo "  $p [$avail]"
   done
-  echo "(точный расчёт докачки — при 'hfctl install/use': pull идемпотентен, скачанное пропускает)"
+  echo "(точный расчёт докачки — при 'hfctl install/use': pull идемпотентен,"
+  echo " уже скачанные и sha256-верифицированные файлы пропускает)"
 }
 
 cmd_uninstall() {
