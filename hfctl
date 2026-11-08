@@ -18,8 +18,8 @@ set -euo pipefail
 
 # ── конфигурация (env переопределяет) ───────────────────────────────────────
 IMAGE="${HFCTL_IMAGE:-ghcr.io/warpfront/hipfire:0.4.5}"
-STACK_DIR="${HFCTL_DIR:-$HOME/hipfire}"          # каталог стека (compose-файлы, .env)
-MODELS_DIR="${HFCTL_MODELS:-$HOME/models/hipfire}"
+STACK_DIR="${HFCTL_DIR:-$HOME/hipfire}"          # всё инсталляция здесь (compose, .env, бинарь)
+MODELS_DIR="${HFCTL_MODELS:-$STACK_DIR/models}"  # модели — внутри стека
 PORT="${HFCTL_PORT:-11435}"
 BIND="${HFCTL_BIND:-0.0.0.0}"                    # 0.0.0.0 = LAN без ключа; 127.0.0.1 = локально
 MODEL_DEFAULT="${HFCTL_MODEL:-qwen3.8:27b-mq6-xt}"
@@ -87,6 +87,10 @@ preflight() {
 write_stack_files() {
   log "стек в $STACK_DIR"
   mkdir -p "$STACK_DIR" "$MODELS_DIR"
+  # бинарь живёт в стеке: вотчдог и юниты ссылаются на $STACK_DIR/hfctl
+  if [ "$SELF" != "$STACK_DIR/hfctl" ]; then
+    cp "$SELF" "$STACK_DIR/hfctl.new" && chmod +x "$STACK_DIR/hfctl.new" && mv -f "$STACK_DIR/hfctl.new" "$STACK_DIR/hfctl"
+  fi
 
   # compose.yml — дословно из репозитория hipfire 0.4.5 (без monitoring-профилей:
   # они ссылаются на каталоги репо, которые hfctl не разворачивает).
@@ -332,6 +336,10 @@ cmd_autostart() {
   local unit_dir="$HOME/.config/systemd/user" bin
   bin="$(command -v podman)"
   mkdir -p "$unit_dir"
+  # юниты ссылаются на $STACK_DIR/hfctl — убедимся, что копия на месте
+  if [ ! -f "$STACK_DIR/hfctl" ] && [ "$SELF" != "$STACK_DIR/hfctl" ]; then
+    mkdir -p "$STACK_DIR"; cp "$SELF" "$STACK_DIR/hfctl"; chmod +x "$STACK_DIR/hfctl"
+  fi
   cat > "$unit_dir/$UNIT_NAME.service" <<EOF
 [Unit]
 Description=hipfire serve (podman compose stack, hfctl)
@@ -364,7 +372,7 @@ Type=oneshot
 # ВАЖНО: без KillMode=process systemd при завершении oneshot-юнита убивает
 # весь cgroup — вместе с только что поднятым контейнером (SIGTERM/143).
 KillMode=process
-ExecStart=/usr/bin/env bash $SELF _watchdog
+ExecStart=/usr/bin/env bash $STACK_DIR/hfctl _watchdog
 EOF
   cat > "$unit_dir/$UNIT_NAME-watchdog.timer" <<EOF
 [Unit]
@@ -422,18 +430,26 @@ cmd_uninstall() {
     esac
   done
   echo "uninstall снимет: контейнеры, сеть проекта, volumes (config/kernels),"
-  echo "юнит автозапуска, limits.d, каталог стека $STACK_DIR."
-  echo "Остаются: модели в $MODELS_DIR (см. --purge-models), образ $IMAGE (--purge-image),"
-  echo "группа render, сам podman."
+  echo "юниты+таймер автозапуска, limits.d, каталог стека $STACK_DIR (включая hfctl)."
+  echo "Модели $MODELS_DIR: $([ "$purge_models" = 1 ] && echo 'УДАЛЯЮТСЯ (--purge-models)' || echo 'СОХРАНЯЮТСЯ (переезжают в стеке)')"
+  echo "Образ $IMAGE: $([ "$purge_image" = 1 ] && echo 'УДАЛЯЕТСЯ (--purge-image)' || echo 'остаётся (--purge-image — удалить)')"
+  echo "Не трогаем: podman, группа render, чужие каталоги."
   read -r -p "Продолжить? [y/N] " a; [ "$a" = y ] || { echo "отменено"; exit 0; }
   cmd_noautostart || true
   ( cd "$STACK_DIR" 2>/dev/null && compose down 2>&1 | tail -2 ) || true
   podman volume rm hipfire_hipfire-config hipfire_hipfire-kernels 2>/dev/null || true
+  # модели живут внутри стека: при сохранении — временно переезжают, потом назад
+  keep=""
+  if [ "$purge_models" != 1 ] && [ -d "$MODELS_DIR" ]; then
+    keep="$(dirname "$STACK_DIR")/.hfctl-models-$$"
+    mv "$MODELS_DIR" "$keep"
+  fi
   rm -rf "$STACK_DIR"
+  if [ -n "$keep" ]; then mkdir -p "$STACK_DIR"; mv "$keep" "$MODELS_DIR"; fi
   if [ -f /etc/security/limits.d/99-hipfire-memlock.conf ]; then
     sudo rm -f /etc/security/limits.d/99-hipfire-memlock.conf
   fi
-  if [ "$purge_models" = 1 ]; then rm -rf "$MODELS_DIR"; echo "модели удалены"; fi
+  if [ "$purge_models" = 1 ]; then echo "модели удалены"; fi
   if [ "$purge_image" = 1 ];  then podman rmi "$IMAGE" 2>/dev/null || true; echo "образ удалён"; fi
   echo "uninstall DONE"
 }

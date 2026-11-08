@@ -6,7 +6,7 @@ STACK="$HF_STACK"            # имя каталога стека в $HOME
 DIR="$HOME/$STACK"
 IMAGE=ghcr.io/warpfront/hipfire:0.4.5
 MODEL_TAG=qwen3.8:27b-mq6-xt
-MODELS_PATH="$HOME/models/hipfire"   # переопредели HF_MODELS_PATH при желании
+MODELS_PATH="$HOME/hipfire/models"   # переопредели HF_MODELS_PATH при желании
 [ -n "${HF_MODELS_PATH:-}" ] && MODELS_PATH="$HF_MODELS_PATH"
 
 [ -d "$DIR" ] || { echo "FATAL: нет каталога стека $DIR (сначала deploy_hipfire.sh repo)" >&2; exit 1; }
