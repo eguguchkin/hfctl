@@ -5,12 +5,21 @@
 #
 #   scp hfctl user@host: && ssh user@host 'bash hfctl install'
 #
-# Подкоманды:
-#   install [--mode single|slots] [--model mq6|mq4] [--slots N]
-#   up | down | status | logs [-n N] | health
-#   mode single|slots [N]        — сменить профиль движка + recreate
-#   autostart | noautostart      — автозапуск при загрузке (вкл/выкл)
+# Команды:
+#   install [--profile P] [--port N] [--bind A] [--models-dir D] [--no-autostart]
+#   use <profile>                — переключить профиль (+recreate, заменяет
+#                                  конфиг автозапуска; недостающие модели
+#                                  докачиваются с вопросом)
+#   status [--json] | logs [-f] [-n N]
+#   on | off                     — автозапуск вкл / выкл (off = стоп + снятие
+#                                  с автозапуска; файлы/модели/образ целы)
 #   uninstall [--purge-models] [--purge-image]
+#
+# Профили:
+#   27b-single (по умолчанию) — 27B в обеих квантах (mq4 default), singleton+DFlash
+#   27b-slots                 — те же модели, multi_slot 2×262144 (HOL-изоляция)
+#
+# Скрытые алиасы (совместимость): up|down|mode single|slots|autostart|noautostart.
 #
 # Идемпотентен: повторный install доводит существующую инсталляцию до
 # целевого состояния. Переопределяемые переменные — ниже.
@@ -22,14 +31,10 @@ STACK_DIR="${HFCTL_DIR:-$HOME/hipfire}"          # всё инсталляция
 MODELS_DIR="${HFCTL_MODELS:-$STACK_DIR/models}"  # модели — внутри стека
 PORT="${HFCTL_PORT:-11435}"
 BIND="${HFCTL_BIND:-0.0.0.0}"                    # 0.0.0.0 = LAN без ключа; 127.0.0.1 = локально
-MODEL_DEFAULT="${HFCTL_MODEL:-qwen3.8:27b-mq6-xt}"
-MODEL_ALT="qwen3.8:27b-mq4-xts"                  # ставится всегда (быстрая)
-DRAFT_TAG="qwen3.8:27b-draft-mq4"                # dflash-черновик (рекомендованный контроллер)
 # ВАЖНО: в контейнер models монтируется на /home/hipfire/.hipfire/models —
 # HIPFIRE_DFLASH_DRAFT указывается КОНТЕЙНЕРНЫМ путём, не хостовым.
 DRAFT_FILE="/home/hipfire/.hipfire/models/qwen38-27b-dflash-mq4.hfq"
-MODE="single"                                    # single | slots (--mode)
-SLOTS=2                                          # для slots (--slots N; 4x262144 не влезает в OOM-guard)
+SLOTS="${HFCTL_SLOTS:-2}"                        # слотов в 27b-slots (4×262144 не влезает в OOM-guard)
 CONTAINER=hipfire_hipfire_1
 UNIT_NAME=hipfire-compose
 STOP_MARKER="$STACK_DIR/.hfctl-stopped"   # явная остановка: вотчдог не встаёт
@@ -37,12 +42,37 @@ SELF="$(readlink -f "$0")"
 MAX_SEQ=262144
 MEMLOCK=1318060032
 
+# ── профили ─────────────────────────────────────────────────────────────────
+# Формат: default_model|all_models (пробел)|draft_tag ('-' = нет)|min_ram_gib|описание
+# Канонические id — spec/hfctl.md §5; flash-multi добавляется этапом 2.
+PROFILE_LIST="27b-single 27b-slots"
+profile_27b_single="qwen3.8:27b-mq4-xts|qwen3.8:27b-mq4-xts qwen3.8:27b-mq6-xt|qwen3.8:27b-draft-mq4|58|singleton+DFlash (максимум соло-скорости)"
+profile_27b_slots="qwen3.8:27b-mq4-xts|qwen3.8:27b-mq4-xts qwen3.8:27b-mq6-xt|qwen3.8:27b-draft-mq4|58|multi_slot ${SLOTS}×${MAX_SEQ} (HOL-изоляция; −25% агрегат)"
+PROFILE_DEFAULT=27b-single
+
+profile_field() {  # profile_field <id> <N> — N-е поле профиля (1-based, '|')
+  local name="profile_$(echo "$1" | tr '-' '_')" v
+  v="${!name:-}"
+  [ -n "$v" ] || return 1
+  echo "$v" | cut -d'|' -f"$2"
+}
+resolve_profile() {  # нормализация алиасов → канонический id; 1 если неизвестно
+  case "$1" in
+    27b-single|single|mq6|mq4) echo 27b-single ;;
+    27b-slots|slots)           echo 27b-slots ;;
+    *) return 1 ;;
+  esac
+}
+
 log()  { printf '\n\033[1;36m== %s\033[0m\n' "$*"; }
 warn() { printf '\033[1;33mWARN:\033[0m %s\n' "$*" >&2; }
 die()  { printf '\033[1;31mFATAL:\033[0m %s\n' "$*" >&2; exit 1; }
 
 CF=( -f compose.yml -f compose.halo.yml -f compose.local.yml )
 compose() { ( cd "$STACK_DIR" && podman compose "${CF[@]}" "$@" ); }
+env_val() { [ -f "$STACK_DIR/.env" ] && grep -E "^$1=" "$STACK_DIR/.env" 2>/dev/null | head -1 | cut -d= -f2- || true; }
+cur_profile() { local p; p=$(env_val HFCTL_PROFILE); echo "${p:-$PROFILE_DEFAULT}"; }
+cur_model()   { env_val HIPFIRE_MODEL || echo "$(profile_field "$(cur_profile)" 1)"; }
 
 # ── префлайт и хост-подготовка ──────────────────────────────────────────────
 preflight() {
@@ -175,6 +205,7 @@ HALO
 
   # compose.local.yml: DFlash-wiring (mq6-xt не объявляет sidecar в реестре;
   # MQ4 draft — рекомендованный контроллер). Пустое значение = DFlash выключен.
+  # (этап 2: сделать условным по draft-полю профиля)
   local prompt_vol=""
   [ -d "$STACK_DIR/benchmarks/prompts" ] && prompt_vol="
     volumes:
@@ -185,10 +216,15 @@ services:
     environment:
       HIPFIRE_DFLASH_DRAFT: $DRAFT_FILE
 EOF
+}
 
+# ── .env: канон профиля + параметры (порт/bind/путь сохраняем существующие) ─
+write_env() {  # write_env <profile_id> <default_model>
+  local prof="$1" model="$2"
   cat > "$STACK_DIR/.env" <<EOF
 # hfctl (сгенерировано; после ручной правки — hfctl up)
-HIPFIRE_MODEL=$MODEL_DEFAULT
+HFCTL_PROFILE=$prof
+HIPFIRE_MODEL=$model
 HIPFIRE_PORT=$PORT
 HIPFIRE_BIND=$BIND
 HIPFIRE_UI=0
@@ -203,26 +239,29 @@ EOF
 cfgset() {  # cfgset <key> <value>
   compose run --rm --no-deps hipfire hipfire config set "$1" "$2" </dev/null 2>&1 | tail -1 || true
 }
-apply_mode() {  # apply_mode single|slots [N]
-  local mode="$1" n="${2:-2}"
-  log "профиль движка: $mode"
+apply_profile() {  # apply_profile <id> — ключи движка из таблицы профилей
+  local prof="$1"
+  log "профиль движка: $prof ($(profile_field "$prof" 5))"
   cfgset memory.max_seq "$MAX_SEQ"
   cfgset memory.session_cache_disk_bytes 34359738368
   cfgset speculation.dflash on
-  if [ "$mode" = slots ]; then
-    cfgset serve.multi_slot true
-    cfgset serve.multi_slot_slots "$n"
-    cfgset serve.multi_slot_ctx "$MAX_SEQ"
-    cfgset serve.continuous_batch_size 1
-    cfgset serve.vmm_batch false
-  else
-    cfgset serve.multi_slot false
-    cfgset serve.multi_slot_slots 4
-    cfgset serve.multi_slot_ctx "$MAX_SEQ"
-    cfgset serve.continuous_batch_size 4
-    cfgset serve.vmm_batch true
-    cfgset serve.batch_nonexact true
-  fi
+  case "$prof" in
+    27b-slots)
+      cfgset serve.multi_slot true
+      cfgset serve.multi_slot_slots "$SLOTS"
+      cfgset serve.multi_slot_ctx "$MAX_SEQ"
+      cfgset serve.continuous_batch_size 1
+      cfgset serve.vmm_batch false
+      ;;
+    *)  # 27b-single (default)
+      cfgset serve.multi_slot false
+      cfgset serve.multi_slot_slots 4
+      cfgset serve.multi_slot_ctx "$MAX_SEQ"
+      cfgset serve.continuous_batch_size 4
+      cfgset serve.vmm_batch true
+      cfgset serve.batch_nonexact true
+      ;;
+  esac
 }
 
 wait_health() {  # wait_health [timeout_sec]
@@ -263,7 +302,6 @@ smoke() {
   [ "$ok" = 1 ] || die "смоук не прошёл — смотри 'hfctl logs'"
   echo "SMOKE: OK"
 }
-cur_model() { grep '^HIPFIRE_MODEL=' "$STACK_DIR/.env" | cut -d= -f2; }
 
 pull_model() {  # pull_model <tag> — идемпотентно (sha256-верификация внутри hipfire pull)
   local tag="$1"
@@ -272,64 +310,156 @@ pull_model() {  # pull_model <tag> — идемпотентно (sha256-вери
     hipfire pull "$tag" --yes 2>&1 | tail -2
 }
 
+pull_profile_models() {  # все модели + draft профиля
+  local prof="$1" tag draft
+  podman image exists "$IMAGE" || podman pull "$IMAGE" >/dev/null || podman pull "$IMAGE"
+  for tag in $(profile_field "$prof" 2); do
+    pull_model "$tag"
+  done
+  draft=$(profile_field "$prof" 3)
+  [ "$draft" != "-" ] && [ -n "$draft" ] && pull_model "$draft" || true
+}
+
 # ── подкоманды ──────────────────────────────────────────────────────────────
 cmd_install() {
+  local prof="" no_autostart=0 set_port=0 set_bind=0 set_models=0
   while [ $# -gt 0 ]; do
     case "$1" in
-      --mode) MODE="$2"; shift 2 ;;
-      --model)
-        # алиасы: mq6 -> mq6-xt, mq4 -> mq4-xts (можно и полный суффикс)
-        case "$2" in
-          mq6) MODEL_DEFAULT=qwen3.8:27b-mq6-xt ;;
-          mq4) MODEL_DEFAULT=qwen3.8:27b-mq4-xts ;;
-          qwen3.8:27b-*) MODEL_DEFAULT="$2" ;;
-          *) die "--model: mq6|mq4|qwen3.8:27b-* (получено: $2)" ;;
-        esac; shift 2 ;;
-      --slots) SLOTS="$2"; shift 2 ;;
-      *) die "неизвестный флаг install: $1" ;;
+      --profile)     prof="$2"; shift 2 ;;
+      --port)        PORT="$2"; set_port=1; shift 2 ;;
+      --bind)        BIND="$2"; set_bind=1; shift 2 ;;
+      --models-dir)  MODELS_DIR="$2"; set_models=1; shift 2 ;;
+      --no-autostart) no_autostart=1; shift ;;
+      *) die "неизвестный флаг install: $1 (доступны: --profile ${PROFILE_LIST// /|} --port --bind --models-dir --no-autostart)" ;;
     esac
   done
-  case "$MODE" in single|slots) ;; *) die "--mode single|slots" ;; esac
+  # миграция v1-.env (нет HFCTL_PROFILE): сохраняем текущую модель/порт/bind/путь
+  if [ -f "$STACK_DIR/.env" ] && [ -z "$(env_val HFCTL_PROFILE)" ]; then
+    local old; old=$(env_val HIPFIRE_MODEL)
+    if [ -n "$old" ]; then
+      MODEL_DEFAULT="$old"
+      warn "миграция: найден старый .env — профиль $PROFILE_DEFAULT, модель по умолчанию остаётся $old"
+    fi
+    local v
+    v=$(env_val HIPFIRE_PORT);        [ -n "$v" ] && [ "$set_port" = 0 ]  && PORT="$v"
+    v=$(env_val HIPFIRE_BIND);        [ -n "$v" ] && [ "$set_bind" = 0 ]  && BIND="$v"
+    v=$(env_val HIPFIRE_MODELS_PATH); [ -n "$v" ] && [ "$set_models" = 0 ] && MODELS_DIR="$v"
+  fi
+  prof=$(resolve_profile "${prof:-$PROFILE_DEFAULT}") || die "неизвестный профиль '$prof' (доступны: $PROFILE_LIST)"
   preflight
   write_stack_files
+  MODEL_DEFAULT="${HFCTL_MODEL:-$(profile_field "$prof" 1)}"
+  write_env "$prof" "$MODEL_DEFAULT"
   log "образ $IMAGE (если ещё не локально)"
   podman image exists "$IMAGE" || podman pull "$IMAGE"
-  # обе модели + draft. Дефолтную дополнительно проверит init-сервис при up.
-  pull_model "$MODEL_DEFAULT"
-  [ "$MODEL_DEFAULT" = "$MODEL_ALT" ] || pull_model "$MODEL_ALT"
-  pull_model "$DRAFT_TAG"
+  pull_profile_models "$prof"
   compose up -d 2>&1 | tail -3
-  apply_mode "$MODE" "$SLOTS"
+  apply_profile "$prof"
   compose up -d --force-recreate 2>&1 | tail -3
   wait_health 900
   smoke
-  log "готов. Сервер: http://$BIND:$PORT (модель по умолчанию: $(cur_model), режим: $MODE)"
-  echo "Дальше: 'hfctl autostart' — автозапуск при загрузке; 'hfctl up|down|status|logs|mode|uninstall'"
+  if [ "$no_autostart" = 1 ]; then
+    echo "(автозапуск не включён — '--no-autostart'; включить: hfctl on)"
+  else
+    cmd_autostart
+  fi
+  log "готов. Сервер: http://$BIND:$PORT | профиль: $prof | модель по умолчанию: $(cur_model)"
+  echo "Дальше: 'hfctl use <profile>' — сменить профиль; 'hfctl off' — остановить; 'hfctl status'"
+}
+
+cmd_use() {
+  local p="${1:-}"
+  [ -n "$p" ] || die "использование: hfctl use <profile> (${PROFILE_LIST// /|})"
+  [ -f "$STACK_DIR/.env" ] || die "стек не установлен — сначала 'hfctl install'"
+  p=$(resolve_profile "$p") || die "неизвестный профиль '$p' (доступны: $PROFILE_LIST)"
+  # порт/bind/путь — из текущего .env (use не трогает параметры, только профиль)
+  local v
+  v=$(env_val HIPFIRE_PORT);        [ -n "$v" ] && PORT="$v"
+  v=$(env_val HIPFIRE_BIND);        [ -n "$v" ] && BIND="$v"
+  v=$(env_val HIPFIRE_MODELS_PATH); [ -n "$v" ] && MODELS_DIR="$v"
+  preflight
+  pull_profile_models "$p"
+  MODEL_DEFAULT=$(profile_field "$p" 1)
+  write_env "$p" "$MODEL_DEFAULT"
+  compose up -d 2>&1 | tail -2      # контейнеры могут быть остановлены (off)
+  apply_profile "$p"
+  compose up -d --force-recreate 2>&1 | tail -2
+  wait_health 600
+  smoke
+  log "профиль $p активен (конфиг автозапуска обновлён — переживёт рестарт)"
 }
 
 cmd_up()   { rm -f "$STOP_MARKER"; hf_up_locked; wait_health 600; }
 cmd_down() { touch "$STOP_MARKER"; compose stop 2>&1 | tail -2; echo "остановлен (контейнеры/файлы/образ целы; вотчдог молчит до 'hfctl up')"; }
 
-cmd_status() {
-  echo "── контейнеры ──"
-  podman ps -a --filter "name=hipfire" --format 'table {{.Names}}\t{{.Status}}\t{{.Ports}}'
-  echo "── health ──"
-  curl -fsS -m 5 "http://127.0.0.1:$PORT/health" 2>/dev/null \
-    | python3 -c 'import json,sys;d=json.load(sys.stdin);c=d.get("capabilities",{});print("model:",d.get("model"),"| mode:",c.get("mode"),"| slots:",c.get("multi_slot_slots"),"| loading:",d.get("loading_model"))' \
-    || echo "(сервер не отвечает)"
-  echo "── автозапуск ──"
-  systemctl --user is-enabled "$UNIT_NAME.service" 2>/dev/null || echo "выключен"
-  systemctl --user is-enabled "$UNIT_NAME-watchdog.timer" 2>/dev/null | sed 's/^/watchdog: /' || true
-  loginctl show-user "$USER" --property=Linger 2>/dev/null || true
+cmd_on()  { cmd_autostart; cmd_up; }
+cmd_off() {
+  # Юнит oneshot контейнеры не держит (compose up -d отсоединён) — останавливаем
+  # стек напрямую, иначе ExecStop не выполнится для уже завершённого юнита.
+  mkdir -p "$STACK_DIR"
+  compose stop >/dev/null 2>&1 || true
+  touch "$STOP_MARKER"
+  systemctl --user disable "$UNIT_NAME.service" "$UNIT_NAME-watchdog.timer" 2>/dev/null || true
+  rm -f "$HOME/.config/systemd/user/$UNIT_NAME.service" \
+        "$HOME/.config/systemd/user/$UNIT_NAME-watchdog.service" \
+        "$HOME/.config/systemd/user/$UNIT_NAME-watchdog.timer"
+  systemctl --user daemon-reload
+  # linger глушим: в выключенном состоянии сервер не должен вскакивать при boot.
+  sudo loginctl disable-linger "$USER"
+  echo "ВЫКЛ: сервер остановлен, с автозапуска снят (юниты удалены, linger off)."
+  echo "Файлы, модели и образ целы. Вернуть: hfctl on"
 }
 
-cmd_logs() { local n=80 a; for a in "$@"; do case "$a" in [0-9]*) n="$a";; esac; done; podman logs -t --tail "$n" "$CONTAINER" 2>&1; }
+cmd_status() {
+  local json=0; [ "${1:-}" = "--json" ] && json=1
+  local prof auto wdog body
+  prof=$(cur_profile)
+  auto=$(systemctl --user is-enabled "$UNIT_NAME.service" 2>/dev/null || echo disabled)
+  wdog=$(systemctl --user is-enabled "$UNIT_NAME-watchdog.timer" 2>/dev/null || echo disabled)
+  body=$(curl -fsS -m 5 "http://127.0.0.1:$PORT/health" 2>/dev/null || echo "")
+  if [ "$json" = 1 ]; then
+    PROFILE="$prof" AUTO="$auto" WDOG="$wdog" python3 -c '
+import json, sys, os
+try: h = json.loads(sys.stdin.read())
+except Exception: h = None
+print(json.dumps({
+  "profile": os.environ["PROFILE"],
+  "autostart": os.environ["AUTO"] == "enabled",
+  "watchdog": os.environ["WDOG"] == "enabled",
+  "health": h,
+}, ensure_ascii=False))' <<<"$body"
+    return
+  fi
+  local hline
+  hline=$(printf '%s' "$body" | python3 -c 'import json,sys
+d=json.load(sys.stdin); c=d.get("capabilities",{})
+st="ok" if d.get("status")=="ok" and not d.get("loading_model") else ("загрузка: "+str(d.get("loading_model")) if d.get("loading_model") else d.get("status","?"))
+print("health:", st, "| модель:", d.get("model"), "| режим:", c.get("mode"), "| слоты:", c.get("multi_slot_slots"))' 2>/dev/null || echo "health: сервер не отвечает")
+  echo "профиль: $prof | автозапуск: $([ "$auto" = enabled ] && echo вкл || echo выкл) (watchdog: $([ "$wdog" = enabled ] && echo вкл || echo выкл))"
+  echo "$hline"
+  echo "── контейнеры ──"
+  podman ps -a --filter "name=hipfire" --format 'table {{.Names}}\t{{.Status}}\t{{.Ports}}'
+}
 
+cmd_logs() {
+  local n=80 follow="" a
+  for a in "$@"; do
+    case "$a" in
+      -f) follow="-f" ;;
+      -n) ;;
+      [0-9]*) n="$a" ;;
+      -n[0-9]*) n="${a#-n}" ;;
+      *) die "использование: hfctl logs [-f] [-n N]" ;;
+    esac
+  done
+  podman logs $follow -t --tail "$n" "$CONTAINER" 2>&1
+}
+
+# скрытый алиас совместимости: mode single|slots [N] == use 27b-*
 cmd_mode() {
   local m="${1:-}"; [ -n "$m" ] || die "использование: hfctl mode single|slots [N]"
-  apply_mode "$m" "${2:-2}"
-  compose up -d --force-recreate 2>&1 | tail -2
-  wait_health 600
+  [ -n "${2:-}" ] && SLOTS="$2"
+  cmd_use "$m"
 }
 
 cmd_autostart() {
@@ -361,8 +491,8 @@ WantedBy=default.target
 EOF
   # вотчдог крашей: rootless podman не оставляет живого наблюдателя после
   # `compose up -d` (проверено kill-тестом), поэтому раз в минуту проверяем,
-  # что контейнер жив, если только стек не остановлен ЯВНО (hfctl down /
-  # noautostart пишут marker).
+  # что контейнер жив, если только стек не остановлен ЯВНО (hfctl down / off
+  # пишут marker).
   cat > "$unit_dir/$UNIT_NAME-watchdog.service" <<EOF
 [Unit]
 Description=hipfire watchdog (hfctl): поднимает стек после нештатного падения
@@ -433,21 +563,6 @@ cmd_watchdog() {
   fi
 }
 
-cmd_noautostart() {
-  # Юнит oneshot контейнеры не держит (compose up -d отсоединён) — останавливаем
-  # стек напрямую, иначе ExecStop не выполнится для уже завершённого юнита.
-  compose stop >/dev/null 2>&1 || true
-  touch "$STOP_MARKER"
-  systemctl --user disable "$UNIT_NAME.service" "$UNIT_NAME-watchdog.timer" 2>/dev/null || true
-  rm -f "$HOME/.config/systemd/user/$UNIT_NAME.service" \
-        "$HOME/.config/systemd/user/$UNIT_NAME-watchdog.service" \
-        "$HOME/.config/systemd/user/$UNIT_NAME-watchdog.timer"
-  systemctl --user daemon-reload
-  # linger глушим: в выключенном состоянии сервер не должен вскакивать при boot.
-  sudo loginctl disable-linger "$USER"
-  echo "автозапуск ВЫКЛ (юнит снят; инсталляция, образ и модели лежат нетронутые)"
-}
-
 cmd_uninstall() {
   local purge_models=0 purge_image=0
   while [ $# -gt 0 ]; do
@@ -463,7 +578,7 @@ cmd_uninstall() {
   echo "Образ $IMAGE: $([ "$purge_image" = 1 ] && echo 'УДАЛЯЕТСЯ (--purge-image)' || echo 'остаётся (--purge-image — удалить)')"
   echo "Не трогаем: podman, группа render, чужие каталоги."
   read -r -p "Продолжить? [y/N] " a; [ "$a" = y ] || { echo "отменено"; exit 0; }
-  cmd_noautostart || true
+  cmd_off || true
   ( cd "$STACK_DIR" 2>/dev/null && compose down 2>&1 | tail -2 ) || true
   podman volume rm hipfire_hipfire-config hipfire_hipfire-kernels 2>/dev/null || true
   # модели живут внутри стека: при сохранении — временно переезжают, потом назад
@@ -483,24 +598,26 @@ cmd_uninstall() {
 }
 
 usage() {
-  sed -n '2,16p' "$0" | sed 's/^# \{0,1\}//'
-  cat <<EOF
-переменные окружения: HFCTL_IMAGE HFCTL_DIR HFCTL_MODELS HFCTL_PORT HFCTL_BIND HFCTL_MODEL
-EOF
+  sed -n '2,17p' "$0" | sed 's/^# \{0,1\}//'
 }
 
 cmd="${1:-}"; shift || true
 case "$cmd" in
   install)      cmd_install "$@" ;;
-  up)           cmd_up ;;
-  down)         cmd_down ;;
-  status)       cmd_status ;;
+  use)          cmd_use "$@" ;;
+  on)           cmd_on ;;
+  off)          cmd_off ;;
+  status)       cmd_status "$@" ;;
+  logs)         cmd_logs "$@" ;;
+  up)           cmd_up ;;          # скрытый алиас
+  down)         cmd_down ;;        # скрытый алиас
+  mode)         cmd_mode "$@" ;;   # скрытый алиас
+  autostart)    cmd_on ;;          # скрытый алиас
+  noautostart)  cmd_off ;;         # скрытый алиас
   _watchdog)    cmd_watchdog ;;
   _boot)        cmd_boot ;;
-  logs)         cmd_logs "$@" ;;
-  mode)         cmd_mode "$@" ;;
-  autostart)    cmd_autostart ;;
-  noautostart)  cmd_noautostart ;;
   uninstall)    cmd_uninstall "$@" ;;
-  *)            usage ;;
+  "")           usage ;;
+  *)            echo "неизвестная команда '$cmd'. Команды: install | use <profile> | status [--json] | logs | on | off | uninstall" \
+                  " (алиасы: up|down|mode|autostart|noautostart). Профили: $PROFILE_LIST" >&2; exit 1 ;;
 esac
