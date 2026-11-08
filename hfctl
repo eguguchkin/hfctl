@@ -363,8 +363,10 @@ check_route() {  # check_route <profile> — фактический роут (sp
   # Источники: логи (fn-lanes staged / lanes refused — авторитетно) + health.
   local prof="$1" clog staged refused
   clog=$(podman logs --tail 400 "$CONTAINER" 2>&1 || true)
-  staged=$(printf '%s' "$clog" | grep -oE "fn-lanes staged: topology=[a-z]+ lanes=[0-9]+[^\"]*spec=[a-z0-9]+" | tail -1)
-  refused=$(printf '%s' "$clog" | grep -oE "qwen4 lanes refused:[^-—]*" | tail -1)
+  # ВАЖНО: '|| true' обязателен — под set -e+pipefail grep без совпадения
+  # (нормальный случай: lanes приняты, отказа нет) молча убивал весь скрипт
+  staged=$(printf '%s' "$clog" | grep -oE "fn-lanes staged: topology=[a-z]+ lanes=[0-9]+[^\"]*spec=[a-z0-9]+" | tail -1) || true
+  refused=$(printf '%s' "$clog" | grep -oE "qwen4 lanes refused:[^-—]*" | tail -1) || true
   case "$prof" in
     flash-multi)
       if [ -n "$staged" ]; then
