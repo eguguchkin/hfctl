@@ -1,5 +1,5 @@
 #!/bin/bash
-# hfbox: bench AR vs DFlash на цели (3 прогона каждая рука, JSON в ~/bench-runs).
+# hfctl: bench AR vs DFlash на цели (3 прогона каждая рука, JSON в ~/bench-runs).
 # Во время bench контейнер serve стопается и поднимается обратно в конце.
 set -euo pipefail
 here="$(dirname "$0")"

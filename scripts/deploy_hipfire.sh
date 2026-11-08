@@ -1,5 +1,5 @@
 #!/bin/bash
-# hfbox: полный деплой hipfire-стека на целевой хост (чистая машина или che-evo).
+# hfctl: полный деплой hipfire-стека на целевой хост (чистая машина или che-evo).
 #
 # Использование:
 #   scripts/deploy_hipfire.sh all           # всё по порядку (по умолчанию)
@@ -49,4 +49,4 @@ case "$PHASE" in
   *) hf_die "unknown phase: $PHASE (all|prep|repo|config|up|health|smoke)" ;;
 esac
 
-echo "hfbox deploy: PHASE '$PHASE' DONE."
+echo "hfctl deploy: PHASE '$PHASE' DONE."

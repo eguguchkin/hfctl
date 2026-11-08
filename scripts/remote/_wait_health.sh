@@ -1,5 +1,5 @@
 #!/bin/bash
-# hfbox (remote): поллинг health до готовности (loading_model == null).
+# hfctl (remote): поллинг health до готовности (loading_model == null).
 # $1 = таймаут в секундах (по умолчанию 300).
 set -u
 TIMEOUT=${1:-300}

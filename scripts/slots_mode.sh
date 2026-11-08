@@ -1,5 +1,5 @@
 #!/bin/bash
-# hfbox: переключение режима multi_slot на целевом сервере.
+# hfctl: переключение режима multi_slot на целевом сервере.
 #   scripts/slots_mode.sh on [slots=2] [ctx=262144]   — включить слот-движок
 #   scripts/slots_mode.sh off                          — вернуть прод (config_prod)
 # Оба направления: конфиг one-shot -> force-recreate -> wait_health -> smoke-lite.

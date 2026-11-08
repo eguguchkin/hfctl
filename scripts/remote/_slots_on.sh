@@ -1,5 +1,5 @@
 #!/bin/bash
-# hfbox (remote): конфиг под слот-движок. $1 = slots (default 2), $2 = ctx/slot.
+# hfctl (remote): конфиг под слот-движок. $1 = slots (default 2), $2 = ctx/slot.
 # 4 слота x 262144 НЕ влезут в OOM-guard (needs ~48.7 GiB) — держим 2×262144
 # или меньше ctx при большем числе слотов.
 set -u

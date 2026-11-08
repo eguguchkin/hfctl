@@ -1,9 +1,9 @@
 #!/bin/bash
-# hfbox (remote): смоук — 3 запроса (код, проза, короткая математика) + health.
+# hfctl (remote): смоук — 3 запроса (код, проза, короткая математика) + health.
 # Проверки: HTTP 200, finish_reason, связность глазами, dflash:true в логах.
 set -u
 URL=http://127.0.0.1:11435/v1/chat/completions
-OUT="$HOME/hfbox-smoke"
+OUT="$HOME/hfctl-smoke"
 mkdir -p "$OUT"
 MODEL=${HF_MODEL:-qwen3.8:27b-mq6-xt}
 
@@ -28,7 +28,7 @@ echo "http=$c3"
 
 python3 - <<'PY'
 import json, os
-out = os.path.expanduser("~/hfbox-smoke")
+out = os.path.expanduser("~/hfctl-smoke")
 ok = True
 for i in (1, 2, 3):
     f = f"{out}/r{i}.json"

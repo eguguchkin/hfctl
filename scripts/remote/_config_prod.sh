@@ -1,5 +1,5 @@
 #!/bin/bash
-# hfbox (remote): прод .env + compose.local.yml + one-shot prod-конфиг в volume.
+# hfctl (remote): прод .env + compose.local.yml + one-shot prod-конфиг в volume.
 # Полностью идемпотентно, можно гонять до первого up.
 set -u
 STACK="$HF_STACK"            # имя каталога стека в $HOME
@@ -14,7 +14,7 @@ cd "$DIR"
 
 echo "== 1. .env (prod)"
 cat > .env <<EOF
-# hfbox prod (2026-11-07). Compose-дефолты ниже повторяют .env.example.
+# hfctl prod (2026-11-07). Compose-дефолты ниже повторяют .env.example.
 HIPFIRE_MODEL=$MODEL_TAG
 HIPFIRE_PORT=11435
 HIPFIRE_BIND=0.0.0.0

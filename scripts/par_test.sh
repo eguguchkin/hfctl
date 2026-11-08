@@ -1,5 +1,5 @@
 #!/bin/bash
-# hfbox: параллельный API-тест на цели. Использование: scripts/par_test.sh [N=4]
+# hfctl: параллельный API-тест на цели. Использование: scripts/par_test.sh [N=4]
 set -euo pipefail
 here="$(dirname "$0")"
 source "$here/lib.sh"

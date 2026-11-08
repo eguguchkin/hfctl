@@ -1,5 +1,5 @@
 #!/bin/bash
-# hfbox (remote): bench AR vs DFlash (каждая рука ×3 прогона) + md5 бинариов.
+# hfctl (remote): bench AR vs DFlash (каждая рука ×3 прогона) + md5 бинариов.
 # Фикстура prompt: /prompts/merge_sort_thinking_off.txt (маунт compose.local.yml),
 # bare-режим bench: --prompt-file --backend noslots --workload stateless.
 # JSON-артефакты: ~/bench-runs/<arm>_<i>.json; итоговая сводка в stdout.

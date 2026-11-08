@@ -21,8 +21,8 @@ hipfire 0.4.5) и по upstream-докам (`docs/SERVE.md`, `docs/MODELS.md`).
 Репозиторий на GitHub (public). README начинается с quickstart:
 
 ```bash
-git clone https://github.com/<org>/hfbox.git
-cd hfbox
+git clone https://github.com/<org>/hfctl.git
+cd hfctl
 ./install.sh              # кладёт hfctl в ~/.local/bin (без sudo)
 hfctl install             # preflight → модели → конфиг → старт → smoke → автозапуск
 ```

@@ -1,5 +1,5 @@
 #!/bin/bash
-# hfbox: A/B «параллель vs сериал» (только для multi-slot экспериментов).
+# hfctl: A/B «параллель vs сериал» (только для multi-slot экспериментов).
 set -euo pipefail
 here="$(dirname "$0")"
 source "$here/lib.sh"

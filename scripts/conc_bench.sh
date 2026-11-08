@@ -1,5 +1,5 @@
 #!/bin/bash
-# hfbox: батарея конкурентности (solo/parallel/short-behind-long) на цели.
+# hfctl: батарея конкурентности (solo/parallel/short-behind-long) на цели.
 # Перед запуском зафиксируй, в каком режиме сервер — вывод помечай сам.
 set -euo pipefail
 here="$(dirname "$0")"

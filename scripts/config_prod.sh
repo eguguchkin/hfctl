@@ -1,5 +1,5 @@
 #!/bin/bash
-# hfbox: прод .env + compose.local.yml + one-shot прод-конфиг в volume.
+# hfctl: прод .env + compose.local.yml + one-shot прод-конфиг в volume.
 # Работает и на чистой машине (стек может быть ещё не поднят — volume-конфиг
 # подхватится при первом up -d). Идемпотентен.
 set -euo pipefail

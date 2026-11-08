@@ -1,4 +1,4 @@
-# hfbox: общий слой для скриптов — цель, ключ, ssh-хелперы.
+# hfctl: общий слой для скриптов — цель, ключ, ssh-хелперы.
 # Переопределяется переменными окружения: HF_HOST / HF_KEY / HF_STACK.
 
 HF_HOST=${HF_HOST:-hipfire@192.168.1.254}
@@ -23,7 +23,7 @@ hfssh_run() {
     env HF_STACK="$HF_STACK" "${extra[@]}" bash -s -- "$@" < "$script"
 }
 
-hf_die() { echo "hfbox: ERROR: $*" >&2; exit 1; }
+hf_die() { echo "hfctl: ERROR: $*" >&2; exit 1; }
 
 hf_have() { command -v "$1" >/dev/null 2>&1; }
 

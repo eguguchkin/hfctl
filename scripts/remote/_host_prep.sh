@@ -1,5 +1,5 @@
 #!/bin/bash
-# hfbox (remote): донастройка хоста для rootless-podman стека hipfire.
+# hfctl (remote): донастройка хоста для rootless-podman стека hipfire.
 # Точечный sudo: apt, usermod render, limits.d, enable-linger, systemd unit.
 set -u
 STACK="$HF_STACK"            # имя каталога стека в $HOME (обычно "hipfire")

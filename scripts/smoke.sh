@@ -1,5 +1,5 @@
 #!/bin/bash
-# hfbox: смоуксервера — 3 запроса (код/проза/математика) + health + логи.
+# hfctl: смоуксервера — 3 запроса (код/проза/математика) + health + логи.
 set -euo pipefail
 here="$(dirname "$0")"
 source "$here/lib.sh"
