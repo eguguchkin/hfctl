@@ -114,7 +114,7 @@ preflight() {
   [ -e /dev/kfd ] || die "/dev/kfd нет: AMD GPU не виден (проверь драйвер amdgpu)"
   local mem_kb; mem_kb=$(awk '/MemTotal/{print $2}' /proc/meminfo)
   [ "$mem_kb" -ge 57671680 ] || warn "RAM ${mem_kb}kB < ~58 GiB: 27B@262K может не влезть (нужна Halo 60 GiB+)"
-  if ! command -v podman >/dev/null; then
+  if ! command -v podman >/dev/null || ! command -v podman-compose >/dev/null; then
     log "установка podman + podman-compose (sudo точечно)"
     sudo apt-get update -qq && sudo apt-get install -y -qq podman podman-compose
   fi
