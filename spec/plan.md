@@ -183,9 +183,11 @@ VMM QSA-стэйт Flash-Next заявлен «gfx1151/gfx1201 automatic»).
       50 → 60.3 (N=2) → 64.5 tok/s (N=4)**; батчинг реальный (FIFO не менял
       бы aggregate; multi_slot на 27B падал). Артефакт:
       `.local-analysis/flash_gfx1151_128gb.txt`
-- [ ] Ребут: flash-multi поднялся сам, smoke OK.
-- [ ] Профиль машины (GPU, пул, результат lanes) записан в AGENTS.md
-      («Хост-профиль che-max»), §12 spec закрыт.
+- [x] Ребут: flash-multi поднялся сам, smoke OK. — health через 15 c после
+      UP; lanes заново приняты (`fn-lanes staged lanes=4 spec=mtp` в логе)
+- [x] Профиль машины (GPU, пул, результат lanes) записан в AGENTS.md
+      («Хост-профиль che-max»), §12 spec закрыт. — che-FAEX1 профиль
+      дополнен результатами lanes/бенча
 
 ---
 

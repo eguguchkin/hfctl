@@ -59,14 +59,22 @@ multi-slot — см. факты).
 - Тот же юзер `hipfire` (uid **1001**, в sudo), тот же ключ `strix_halo_key`.
 - Ubuntu 26.04.1; Strix Halo **gfx1151** (тот же GPU, что che-evo);
   пул MemTotal 128.6 GB (122 GiB); /home 1.7T (1.3T свободно);
-  /dev/kfd + card0 + renderD128.
-- podman 5.7.0 есть, podman-compose — ставить (hfctl делает сам).
+  /dev/kfd + card0 + renderD128. NPU /dev/accel НЕТ (npu-trunk off,
+  prefill GPU-only — в отличие от che-evo).
+- podman 5.7.0 есть, podman-compose — ставить (hfctl делает сам; ВАЖНО:
+  preflight проверяет оба — podman был без провайдера и pull падал).
 - Сосед: контейнер `gufo-qwen-flash` юзера `che` (uid 1000, :8080) —
-  может держать ~113 GB пула; перед этапом 4 ПРЕДУПРЕДИТЬ пользователя,
-  он останавливает gufo сам (не трогать руками); старт только при
-  MemAvailable ≥ ~100 GiB.
-- Этап 4 (spec/plan.md): flash-multi E2E, lanes-судьба на gfx1151+128 GB,
-  калибровка порога RAM.
+  перед этапом 4 ПРЕДУПРЕДИТЬ пользователя, он останавливает gufo сам;
+  старт только при MemAvailable ≥ ~100 GiB.
+- **Этап 4 ПРОЙДЕН (2026-11-08)**: flash-multi E2E работает — qwen4
+  fn-lanes ПРИНЯТЫ на gfx1151 (`fn-lanes staged: lanes=4 row_budget=4
+  spec=mtp K=7 sampled=true`); бенч: solо 50 tok/s, N=2 → 60.3,
+  N=4 → 64.5 tok/s aggregate (батчинг реальный, aggregate растёт).
+  Порог RAM 80 GiB подтверждён admission-цифрами (~105 GB рабочий
+  максимум). Спиллинг GTT +2…10 GiB при 4-parallel — не влияет на solo.
+  Артефакт: `.local-analysis/flash_gfx1151_128gb.txt`.
+- hfctl стоит в `~/.local/bin/hfctl` + `~/hipfire/hfctl`; живёт flash-multi,
+  autostart вкл, ребут-приёмка зелёная.
 
 ## Деплой-механика (источник: живой стек на che-evo)
 

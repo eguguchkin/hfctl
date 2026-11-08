@@ -199,8 +199,12 @@ experimental — см. §7 про отображение фактическог�
 
 ## 12 · Открытые вопросы (не блокируют реализацию)
 
-1. Точный порог RAM для flash-multi (80 GiB — оценка) и поведение на
-   gfx1151 128 GB: примут ли qwen4-lanes этот GPU — проверить живым тестом.
-2. Draft/sidecar-реестр для flash (нужен ли отдельный dflash-черновик —
-   судя по докам, у flash native MTP, dflash выключен).
+1. ~~Точный порог RAM для flash-multi (80 GiB — оценка) и поведение на
+   gfx1151 128 GB: примут ли qwen4-lanes этот GPU — проверить живым тестом.~~
+   **ЗАКРЫТО этапом 4 (2026-11-08, che-FAEX1)**: qwen4 fn-lanes ПРИНЯТЫ на
+   gfx1151 (lanes=4, spec=mtp K=7, sampled=true); порог 80 GiB подтверждён
+   живым admission (рабочий максимум ~105 GB, запас 25+ GB остаётся).
+2. ~~Draft/sidecar-реестр для flash (нужен ли отдельный dflash-черновик —
+   судя по докам, у flash native MTP, dflash выключен).~~ **ЗАКРЫТО**:
+   native MTP K=7 + n-gram copy lane поднимаются сами, dflash off — верно.
 3. Имя/URL публичного репозитория и org (`<org>` в quickstart выше).
