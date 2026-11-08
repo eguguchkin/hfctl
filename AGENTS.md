@@ -54,6 +54,19 @@ multi-slot — см. факты).
   user namespace, контейнер уходит на container-root (печатает
   предупреждение) и продолжает работать.
 
+## Хост-профиль che-FAEX1 (192.168.1.249) — вторая машина, 128 GB Halo
+
+- Тот же юзер `hipfire` (uid **1001**, в sudo), тот же ключ `strix_halo_key`.
+- Ubuntu 26.04.1; Strix Halo **gfx1151** (тот же GPU, что che-evo);
+  пул MemTotal 128.6 GB (122 GiB); /home 1.7T (1.3T свободно);
+  /dev/kfd + card0 + renderD128.
+- podman 5.7.0 есть, podman-compose — ставить (hfctl делает сам).
+- Сосед: контейнер `gufo-qwen-flash` юзера `che` (uid 1000, :8080) —
+  может держать ~113 GB пула; тесты flash-multi гонять только когда он
+  остановлен (иначе не хватает памяти и, возможно, gpu-lock занят).
+- Этап 4 (spec/plan.md): flash-multi E2E, lanes-судьба на gfx1151+128 GB,
+  калибровка порога RAM.
+
 ## Деплой-механика (источник: живой стек на che-evo)
 
 - Директория стека на хосте: `/home/hipfire/hipfire` (копия репо ~500 MB,
