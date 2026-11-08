@@ -407,7 +407,8 @@ hf_up_locked() {
 cmd_boot() {
   local i
   for i in $(seq 1 24); do
-    [ -e /dev/dri/card0 ] || { sleep 10; continue; }
+    # ядро ROCm — renderD*; у Halo может не быть card0 вообще (нумерация с 1)
+    if ! compgen -G "/dev/dri/renderD*" >/dev/null || [ ! -e /dev/kfd ]; then sleep 10; continue; fi
     if hf_up_locked && [ "$(podman inspect -f '{{.State.Status}}' "$CONTAINER" 2>/dev/null)" = running ]; then
       return 0
     fi
