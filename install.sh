@@ -37,6 +37,8 @@ ok "hfctl → $STACK_DIR/hfctl"
 
 # ── ~/.local/bin/hfctl = симлинк в стек (одна копия, рассинхрон невозможен) ─
 mkdir -p "$BIN_DIR"
+# ln -sfn НЕ заменяет существующий РЕАЛЬНЫЙ файл — удаляем явно
+[ -L "$BIN_DIR/hfctl" ] || [ ! -e "$BIN_DIR/hfctl" ] || rm -f "$BIN_DIR/hfctl"
 ln -sfn "$STACK_DIR/hfctl" "$BIN_DIR/hfctl"
 ok "симлинк: $BIN_DIR/hfctl → $STACK_DIR/hfctl"
 
