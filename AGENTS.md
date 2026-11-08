@@ -156,6 +156,16 @@ prompt merge_sort md5 `253c7ac5`; свежие процессы ×3.
 - **DFlash: decode 130.5 tok/s, τ=13.18 (stdev 0.05)** — реален для
   boilerplate-кода (текст глазами чистый; живая проверка 76.2 tok/s τ6.8).
 - **AR: decode 14.2 tok/s** (стабильно).
+
+### Эталон 2026-11-08: прод `qwen3.8:27b-mq6-xt` (тот же образ/промпт, ×3)
+
+- **DFlash: decode 75.3 tok/s, τ=11.83** (prefill 84, ttft ~450 мс).
+- **AR: decode 9.6 tok/s** (prefill 109, ttft ~349 мс).
+- Против mq4-xts: −42%decode; хуже чисто-байтового масштаба (×1.43) из-за
+  снижения τ (MQ4-draft на MQ4-таргете обучен: 13.18 → 11.83).
+- Артефакты: `.local-analysis/bench_mq6.txt`, `~/bench-runs/`.
+- Параллельные замеры FIFO-vs-slots (таблица выше) тоже сняты на mq4-xts;
+  относительные выводы для mq6-xt ожидаемо те же.
 - Проза: τ~2–3, decode 30–60 tok/s.
 - battery: attractor=0, retrieval_miss=0. chain: кэш сессий работает
   (cached 442→1323).
