@@ -318,11 +318,20 @@ image ghcr, podman volumes/network, `/etc/security/limits.d/99-hipfire-memlock.c
 группа render, linger.
 
 ```
-bash hfctl install [--mode single|slots] [--model mq6|mq4] [--slots N]
-bash hfctl up | down | status | logs [N] | mode single|slots [N]
-bash hfctl autostart | noautostart
-bash hfctl uninstall [--purge-models] [--purge-image]
+hfctl install [--profile P] [--port N] [--bind A] [--models-dir D] [--no-autostart]
+hfctl use 27b-single|27b-slots       # сменить профиль (+конфиг автозапуска)
+hfctl status [--json] | logs [-f] [-n N]
+hfctl on | off                       # автозапуск вкл / стоп+снятие
+hfctl uninstall [--purge-models] [--purge-image]
 ```
+Скрытые алиасы совместимости: `up|down|mode single|slots [N]|autostart|noautostart`.
+Профили (этап 1): `27b-single` (default; singleton+DFlash, модели mq4-xts
+default + mq6-xt hot-swap) и `27b-slots` (multi_slot 2×262144). Канон
+профиля — `HFCTL_PROFILE` в `.env`; boot/вотчдог поднимают его. С 2026-11-08
+прод che-evo на этом (27b-single; модель по умолчанию мигрирована с mq6-xt).
+flash-multi + RAM-гейт — этап 2 (spec/plan.md). install включает автозапуск
+по умолчанию (`--no-autostart` — нет); старые `autostart/noautostart`
+= новые `on/off`.
 
 - install: префлайт (Ubuntu/Debian, /dev/kfd, apt podman+podman-compose,
   группа render (+перелогин exit 42), limits.d memlock (+ребут exit 42),
