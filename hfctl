@@ -307,7 +307,7 @@ cmd_install() {
   echo "Дальше: 'hfctl autostart' — автозапуск при загрузке; 'hfctl up|down|status|logs|mode|uninstall'"
 }
 
-cmd_up()   { rm -f "$STOP_MARKER"; compose up -d 2>&1 | tail -2; wait_health 600; }
+cmd_up()   { rm -f "$STOP_MARKER"; hf_up_locked; wait_health 600; }
 cmd_down() { touch "$STOP_MARKER"; compose stop 2>&1 | tail -2; echo "остановлен (контейнеры/файлы/образ целы; вотчдог молчит до 'hfctl up')"; }
 
 cmd_status() {
@@ -350,7 +350,7 @@ Type=oneshot
 RemainAfterExit=yes
 KillMode=process          # не убивать cgroup контейнеров при остановке юнита
 WorkingDirectory=$STACK_DIR
-ExecStart=$bin compose ${CF[*]} up -d
+ExecStart=/usr/bin/env bash $STACK_DIR/hfctl _boot
 ExecStop=$bin compose ${CF[*]} stop
 TimeoutStartSec=900
 Restart=on-failure
@@ -394,6 +394,29 @@ EOF
   echo "автозапуск ВКЛ (unit + watchdog-таймер 1м, linger=yes)"
 }
 
+# общий lock: параллельные `compose up -d` (вотчдог + boot + ручной up) дерутся
+# за netns — пускаем только один одновременно
+hf_up_locked() {
+  ( flock -n 9 || { echo "up уже выполняется — пропуск"; return 0; }
+    compose up -d 2>&1 | tail -2
+  ) 9>"$STACK_DIR/.hfctl.lock"
+}
+
+# внутренняя команда загрузочного юнита: GPU-ноды (/dev/dri/card0) при boot
+# появляются позже юзера — стучимся до появления/успеха (до ~4 мин)
+cmd_boot() {
+  local i
+  for i in $(seq 1 24); do
+    [ -e /dev/dri/card0 ] || { sleep 10; continue; }
+    if hf_up_locked && [ "$(podman inspect -f '{{.State.Status}}' "$CONTAINER" 2>/dev/null)" = running ]; then
+      return 0
+    fi
+    sleep 10
+  done
+  echo "boot: контейнер так и не запущен за 4 мин" >&2
+  return 1
+}
+
 # внутренняя команда вотчдога (не для ручного запуска)
 cmd_watchdog() {
   [ -f "$STOP_MARKER" ] && return 0
@@ -401,7 +424,7 @@ cmd_watchdog() {
   st=$(podman inspect -f '{{.State.Status}}' "$CONTAINER" 2>/dev/null || echo missing)
   if [ "$st" != running ]; then
     echo "$(date -Is) watchdog: container state=$st -> up" >> "$STACK_DIR/.hfctl-watchdog.log" 2>/dev/null || true
-    compose up -d >/dev/null 2>&1 || true
+    hf_up_locked || true
   fi
 }
 
@@ -468,6 +491,7 @@ case "$cmd" in
   down)         cmd_down ;;
   status)       cmd_status ;;
   _watchdog)    cmd_watchdog ;;
+  _boot)        cmd_boot ;;
   logs)         cmd_logs "$@" ;;
   mode)         cmd_mode "$@" ;;
   autostart)    cmd_autostart ;;
