@@ -28,7 +28,8 @@ set -euo pipefail
 # ── конфигурация (env переопределяет) ───────────────────────────────────────
 IMAGE="${HFCTL_IMAGE:-ghcr.io/warpfront/hipfire:0.4.5}"
 STACK_DIR="${HFCTL_DIR:-$HOME/hipfire}"          # всё инсталляция здесь (compose, .env, бинарь)
-MODELS_DIR="${HFCTL_MODELS:-$STACK_DIR/models}"  # модели — внутри стека
+MODELS_BASE="${HFCTL_MODELS:-$STACK_DIR/models}" # база моделей; внутри — каталог-сет на профиль
+MODELS_DIR="$MODELS_BASE/27b"                    # маунт; пересчитывается set_models_dir()
 PORT="${HFCTL_PORT:-11435}"
 BIND="${HFCTL_BIND:-0.0.0.0}"                    # 0.0.0.0 = LAN без ключа; 127.0.0.1 = локально
 # ВАЖНО: в контейнер models монтируется на /home/hipfire/.hipfire/models —
@@ -93,6 +94,24 @@ profile_avail_list() {
     [ "$(ram_pool_gib)" -ge "$(profile_field "$p" 4)" ] && out="$out $p"
   done
   echo "${out:-—}"
+}
+
+# ── каталоги моделей по сетам (изоляция профилей: сервер видит только свой
+# сет → запрос с чужим model получает 404 вместо молчаливого swap) ───────────
+model_set() { case "$1" in flash-multi) echo flash ;; *) echo 27b ;; esac; }
+set_models_dir() { MODELS_DIR="$MODELS_BASE/$(model_set "$1")"; mkdir -p "$MODELS_DIR"; }
+migrate_models() {  # плоский models/ (v1/v2) → подкаталоги-сеты
+  [ -d "$MODELS_BASE" ] || return 0
+  local f moved=0
+  for f in "$MODELS_BASE"/*; do
+    [ -f "$f" ] || continue
+    case "$(basename "$f")" in
+      *flash-next*) mkdir -p "$MODELS_BASE/flash"; mv "$f" "$MODELS_BASE/flash/"; moved=1 ;;
+      *)            mkdir -p "$MODELS_BASE/27b";   mv "$f" "$MODELS_BASE/27b/";   moved=1 ;;
+    esac
+  done
+  [ "$moved" = 1 ] && log "миграция моделей: разложены по сетам (27b/, flash/) — маунт видит только сет активного профиля"
+  return 0
 }
 
 log()  { printf '\n\033[1;36m== %s\033[0m\n' "$*"; }
@@ -426,10 +445,13 @@ cmd_install() {
     local v
     v=$(env_val HIPFIRE_PORT);        [ -n "$v" ] && [ "$set_port" = 0 ]  && PORT="$v"
     v=$(env_val HIPFIRE_BIND);        [ -n "$v" ] && [ "$set_bind" = 0 ]  && BIND="$v"
-    v=$(env_val HIPFIRE_MODELS_PATH); [ -n "$v" ] && [ "$set_models" = 0 ] && MODELS_DIR="$v"
+    v=$(env_val HIPFIRE_MODELS_PATH); [ -n "$v" ] && [ "$set_models" = 0 ] && MODELS_BASE="$v" && set_models_dir "$prof"
   fi
   prof=$(resolve_profile "${prof:-$PROFILE_DEFAULT}") || die "неизвестный профиль '$prof' (доступны: $PROFILE_LIST)"
   profile_gate "$prof"          # RAM-гейт: отказ ДО любого скачивания (spec §6)
+  # миграция плоского models/ в сеты (один раз; сохраняет скачанное)
+  migrate_models
+  set_models_dir "$prof"
   preflight
   write_stack_files
   # приоритет: HFCTL_MODEL > сохранённая при миграции модель > дефолт профиля
@@ -471,11 +493,22 @@ cmd_use() {
   [ -f "$STACK_DIR/.env" ] || die "стек не установлен — сначала 'hfctl install'"
   p=$(resolve_profile "$p") || die "неизвестный профиль '$p' (доступны: $PROFILE_LIST)"
   profile_gate "$p"             # RAM-гейт: отказ ДО любого скачивания (spec §6)
-  # порт/bind/путь — из текущего .env (use не трогает параметры, только профиль)
-  local v
-  v=$(env_val HIPFIRE_PORT);        [ -n "$v" ] && PORT="$v"
-  v=$(env_val HIPFIRE_BIND);        [ -n "$v" ] && BIND="$v"
-  v=$(env_val HIPFIRE_MODELS_PATH); [ -n "$v" ] && MODELS_DIR="$v"
+  migrate_models                # плоский models/ (старые версии) → сеты
+  set_models_dir "$p"
+  # порт/bind — из текущего .env (use не трогает параметры, только профиль);
+  # путь моделей: уважаем старую базу (если была нестандартная), сет — новый
+  local v mb
+  v=$(env_val HIPFIRE_PORT); [ -n "$v" ] && PORT="$v"
+  v=$(env_val HIPFIRE_BIND); [ -n "$v" ] && BIND="$v"
+  mb=$(env_val HIPFIRE_MODELS_PATH)
+  if [ -n "$mb" ] && [ "$mb" != "$MODELS_DIR" ]; then
+    # старый путь: если он плоский (не содержит /models/<сет>) — это база
+    case "$mb" in
+      */models/27b|*/models/flash) MODELS_BASE="$(dirname "$mb")" ;;
+      *)                           MODELS_BASE="$mb" ;;
+    esac
+    set_models_dir "$p"
+  fi
   preflight
   pull_profile_models "$p"
   MODEL_DEFAULT="${HFCTL_MODEL:-$(profile_field "$p" 1)}"
@@ -710,20 +743,25 @@ cmd_doctor() {  # диагностика без изменений (spec §3): g
 }
 
 cmd_models() {  # что скачано и что требует каждый профиль (spec §3)
-  echo "── на диске ($MODELS_DIR) ──"
-  [ -d "$MODELS_DIR" ] && du -sh "$MODELS_DIR" 2>/dev/null || echo "(каталога нет — ничего не скачано)"
-  echo "── профили: доступность и ожидаемая докачка ──"
-  # файлы моделей: тег → имя файла (пуллеру hipfire известны точные имена;
-  # здесь — по префиксу: точный расчёт всегда делает pull при install/use)
+  echo "── на диске (по сетам профилей, в $MODELS_BASE) ──"
+  local s total
+  for s in 27b flash; do
+    if [ -d "$MODELS_BASE/$s" ]; then
+      total=$(du -sh "$MODELS_BASE/$s" 2>/dev/null | cut -f1)
+      echo "  $s: $total"
+    fi
+  done
+  [ -d "$MODELS_BASE" ] || echo "(каталога нет — ничего не скачано)"
+  echo "── профили: доступность ──"
   local p have; have=$(ram_pool_gib)
   for p in $PROFILE_LIST; do
     local need avail
     need=$(profile_field "$p" 4)
     if [ "$have" -ge "$need" ]; then avail="доступен"; else avail="НЕДОСТУПЕН (RAM: есть ${have} GiB, нужно ≥${need})"; fi
-    echo "  $p [$avail]"
+    echo "  $p → сет models/$(model_set "$p") [$avail]"
   done
-  echo "(точный расчёт докачки — при 'hfctl install/use': pull идемпотентен,"
-  echo " уже скачанные и sha256-верифицированные файлы пропускает)"
+  echo "изоляция: монтируется только сет активного профиля — запрос с моделью"
+  echo "чужого сета получит 404 (молчаливый swap невозможен)"
 }
 
 cmd_uninstall() {
