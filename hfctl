@@ -1,0 +1,393 @@
+#!/usr/bin/env bash
+# hfctl — деплой и управление hipfire-сервером (Strix Halo / gfx11xx) на
+# Ubuntu/Debian одной командой. Копируется ЦЕЛЫМ ФАЙЛОМ на целевую машину и
+# запускается ОТ СВОЕГО ИМЕНИ (не root; sudo применяется точечно):
+#
+#   scp hfctl user@host: && ssh user@host 'bash hfctl install'
+#
+# Подкоманды:
+#   install [--mode single|slots] [--model mq6|mq4] [--slots N]
+#   up | down | status | logs [-n N] | health
+#   mode single|slots [N]        — сменить профиль движка + recreate
+#   autostart | noautostart      — автозапуск при загрузке (вкл/выкл)
+#   uninstall [--purge-models] [--purge-image]
+#
+# Идемпотентен: повторный install доводит существующую инсталляцию до
+# целевого состояния. Переопределяемые переменные — ниже.
+set -euo pipefail
+
+# ── конфигурация (env переопределяет) ───────────────────────────────────────
+IMAGE="${HFCTL_IMAGE:-ghcr.io/warpfront/hipfire:0.4.5}"
+STACK_DIR="${HFCTL_DIR:-$HOME/hipfire}"          # каталог стека (compose-файлы, .env)
+MODELS_DIR="${HFCTL_MODELS:-$HOME/models/hipfire}"
+PORT="${HFCTL_PORT:-11435}"
+BIND="${HFCTL_BIND:-0.0.0.0}"                    # 0.0.0.0 = LAN без ключа; 127.0.0.1 = локально
+MODEL_DEFAULT="${HFCTL_MODEL:-qwen3.8:27b-mq6-xt}"
+MODEL_ALT="qwen3.8:27b-mq4-xts"                  # ставится всегда (быстрая)
+DRAFT_TAG="qwen3.8:27b-draft-mq4"                # dflash-черновик (рекомендованный контроллер)
+DRAFT_FILE="$MODELS_DIR/qwen38-27b-dflash-mq4.hfq"
+MODE="single"                                    # single | slots (--mode)
+SLOTS=2                                          # для slots (--slots N; 4x262144 не влезает в OOM-guard)
+CONTAINER=hipfire_hipfire_1
+UNIT_NAME=hipfire-compose
+MAX_SEQ=262144
+MEMLOCK=1318060032
+
+log()  { printf '\n\033[1;36m== %s\033[0m\n' "$*"; }
+warn() { printf '\033[1;33mWARN:\033[0m %s\n' "$*" >&2; }
+die()  { printf '\033[1;31mFATAL:\033[0m %s\n' "$*" >&2; exit 1; }
+
+CF=( -f compose.yml -f compose.halo.yml -f compose.local.yml )
+compose() { ( cd "$STACK_DIR" && podman compose "${CF[@]}" "$@" ); }
+
+# ── префлайт и хост-подготовка ──────────────────────────────────────────────
+preflight() {
+  [ "$(id -u)" != 0 ] || die "не запускай от root — работай от своего имени (sudo hfctl не нужен)"
+  local id
+  id=$(. /etc/os-release && echo "$ID")
+  case "$id" in ubuntu|debian) ;; *) die "дистрибутив '$id' не поддерживается (нужен Ubuntu/Debian)" ;; esac
+  [ -e /dev/kfd ] || die "/dev/kfd нет: AMD GPU не виден (проверь драйвер amdgpu)"
+  local mem_kb; mem_kb=$(awk '/MemTotal/{print $2}' /proc/meminfo)
+  [ "$mem_kb" -ge 57671680 ] || warn "RAM ${mem_kb}kB < ~58 GiB: 27B@262K может не влезть (нужна Halo 60 GiB+)"
+  if ! command -v podman >/dev/null; then
+    log "установка podman + podman-compose (sudo точечно)"
+    sudo apt-get update -qq && sudo apt-get install -y -qq podman podman-compose
+  fi
+  command -v curl >/dev/null || sudo apt-get install -y -qq curl
+  # группа render для /dev/kfd rootless
+  if ! id -nG | grep -qw render; then
+    log "добавляю $USER в группу render (sudo точечно)"
+    sudo usermod -aG render "$USER"
+    warn "группа применится только после перезахода. Выйди и зайди снова, затем повтори install."
+    exit 42
+  fi
+  # memlock для NPU-trunk (limits.d; требует ребута/пересоздания сессий)
+  local lim="/etc/security/limits.d/99-hipfire-memlock.conf"
+  if [ ! -f "$lim" ]; then
+    log "пишу $lim (memlock $MEMLOCK)"
+    echo "$USER soft memlock $MEMLOCK" | sudo tee "$lim" >/dev/null
+    echo "$USER hard memlock $MEMLOCK" | sudo tee -a "$lim" >/dev/null
+    if [ "$(ulimit -Hl)" != "unlimited" ] && [ "$(ulimit -Hl)" -lt "$MEMLOCK" ]; then
+      warn "текущая сессия ещё с memlock=$(ulimit -Hl). Требуется ребут (или перезаход+сервис-менеджер). Повтори install после ребута."
+      exit 42
+    fi
+  fi
+  # linger: сервер должен жить без активного логина и при boot
+  if [ "$(loginctl show-user "$USER" --property=Linger 2>/dev/null | cut -d= -f2)" != "yes" ]; then
+    log "включаю linger для $USER (сервер переживает logout и стартует при boot)"
+    sudo loginctl enable-linger "$USER"
+  fi
+}
+
+# ── файлы стека (встраиваю официальные compose-файлы hipfire 0.4.5) ─────────
+write_stack_files() {
+  log "стек в $STACK_DIR"
+  mkdir -p "$STACK_DIR" "$MODELS_DIR"
+
+  # compose.yml — дословно из репозитория hipfire 0.4.5 (без monitoring-профилей:
+  # они ссылаются на каталоги репо, которые hfctl не разворачивает).
+  cat > "$STACK_DIR/compose.yml" <<'COMPOSE'
+# hipfire compose stack (upstream hipfire 0.4.5, monitoring profiles trimmed).
+name: hipfire
+
+x-hipfire-engine: &hipfire-engine
+  image: ${HIPFIRE_IMAGE:-ghcr.io/warpfront/hipfire:latest}
+  devices:
+    - /dev/kfd
+    - /dev/dri
+  group_add:
+    - video
+    - render
+  security_opt:
+    - seccomp=unconfined
+  annotations:
+    run.oci.keep_original_groups: "1"
+  environment:
+    - HIPFIRE_MODEL=${HIPFIRE_MODEL:-qwen3.8:27b-mq4-xts}
+    - HIPFIRE_SERVE_UI=${HIPFIRE_UI:-0}
+    - HIPFIRE_SERVE_ARGS=${HIPFIRE_SERVE_ARGS:-}
+    - HF_TOKEN
+    - HIPFIRE_DEVICES
+    - ROCR_VISIBLE_DEVICES
+  volumes:
+    - ${HIPFIRE_MODELS_PATH:-hipfire-models}:/home/hipfire/.hipfire/models
+    - hipfire-config:/home/hipfire/.hipfire
+    - hipfire-kernels:/var/cache/hipfire
+
+services:
+  hipfire-init:
+    <<: *hipfire-engine
+    command: pull --yes ${HIPFIRE_MODEL:-qwen3.8:27b-mq4-xts}
+    restart: "no"
+
+  hipfire:
+    <<: *hipfire-engine
+    command: ["serve"]
+    init: true
+    restart: unless-stopped        # переподнимание при краше — за podman
+    depends_on:
+      hipfire-init:
+        condition: service_completed_successfully
+    ports:
+      - ${HIPFIRE_BIND:-127.0.0.1}:${HIPFIRE_PORT:-11435}:11435
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - |
+          body=$$(curl -fsS http://127.0.0.1:11435/health) && ! printf '%s' "$$body" | grep -Eq '"loading_model"[[:space:]]*:[[:space:]]*"'
+      interval: 15s
+      timeout: 5s
+      retries: 4
+      start_period: 15m
+
+volumes:
+  hipfire-models:
+  hipfire-config:
+  hipfire-kernels:
+COMPOSE
+
+  cat > "$STACK_DIR/compose.halo.yml" <<'HALO'
+# Strix Halo (XDNA2 NPU): /dev/accel + memlock (upstream hipfire 0.4.5).
+services:
+  hipfire-init:
+    devices:
+      - /dev/accel
+    ulimits:
+      memlock:
+        soft: 1318060032
+        hard: 1318060032
+  hipfire:
+    devices:
+      - /dev/accel
+    ulimits:
+      memlock:
+        soft: 1318060032
+        hard: 1318060032
+HALO
+
+  # compose.local.yml: DFlash-wiring (mq6-xt не объявляет sidecar в реестре;
+  # MQ4 draft — рекомендованный контроллер). Пустое значение = DFlash выключен.
+  local prompt_vol=""
+  [ -d "$STACK_DIR/benchmarks/prompts" ] && prompt_vol="
+    volumes:
+      - ./benchmarks/prompts:/prompts:ro"
+  cat > "$STACK_DIR/compose.local.yml" <<EOF
+services:
+  hipfire:$prompt_vol
+    environment:
+      HIPFIRE_DFLASH_DRAFT: $DRAFT_FILE
+EOF
+
+  cat > "$STACK_DIR/.env" <<EOF
+# hfctl (сгенерировано; после ручной правки — hfctl up)
+HIPFIRE_MODEL=$MODEL_DEFAULT
+HIPFIRE_PORT=$PORT
+HIPFIRE_BIND=$BIND
+HIPFIRE_UI=0
+HIPFIRE_SERVE_ARGS=
+HIPFIRE_MODELS_PATH=$MODELS_DIR
+HIPFIRE_IMAGE=$IMAGE
+COMPOSE_FILE=compose.yml:compose.halo.yml:compose.local.yml
+EOF
+}
+
+# ── конфиг движка (volume через compose run — volume проекты гарантированно) ─
+cfgset() {  # cfgset <key> <value>
+  compose run --rm --no-deps hipfire hipfire config set "$1" "$2" </dev/null 2>&1 | tail -1 || true
+}
+apply_mode() {  # apply_mode single|slots [N]
+  local mode="$1" n="${2:-2}"
+  log "профиль движка: $mode"
+  cfgset memory.max_seq "$MAX_SEQ"
+  cfgset memory.session_cache_disk_bytes 34359738368
+  cfgset speculation.dflash on
+  if [ "$mode" = slots ]; then
+    cfgset serve.multi_slot true
+    cfgset serve.multi_slot_slots "$n"
+    cfgset serve.multi_slot_ctx "$MAX_SEQ"
+    cfgset serve.continuous_batch_size 1
+    cfgset serve.vmm_batch false
+  else
+    cfgset serve.multi_slot false
+    cfgset serve.multi_slot_slots 4
+    cfgset serve.multi_slot_ctx "$MAX_SEQ"
+    cfgset serve.continuous_batch_size 4
+    cfgset serve.vmm_batch true
+    cfgset serve.batch_nonexact true
+  fi
+}
+
+wait_health() {  # wait_health [timeout_sec]
+  local t="${1:-900}" i=0
+  log "жду готовности (до ${t}с)"
+  while [ "$i" -lt "$t" ]; do
+    local body
+    if body=$(curl -fsS -m 5 "http://127.0.0.1:$PORT/health" 2>/dev/null); then
+      if ! printf '%s' "$body" | grep -Eq '"loading_model"[[:space:]]*:[[:space:]]*"'; then
+        printf '%s\n' "$body" | head -c 300; echo; echo; echo "HEALTHY после ${i}с"; return 0
+      fi
+    fi
+    sleep 5; i=$((i+5))
+  done
+  warn "не здоров через ${t}с — последние логи:"
+  podman logs --tail 30 "$CONTAINER" 2>&1 | tail -30 || true
+  return 1
+}
+
+smoke() {
+  log "смоук: 2 запроса"
+  local ok=1
+  for p in "Ответь ровно: ок" "Напиши одну строку кода на python: hello world"; do
+    local out
+    out=$(curl -fsS -m 120 "http://127.0.0.1:$PORT/v1/chat/completions" \
+      -H 'Content-Type: application/json' \
+      -d "{\"model\":\"$(cur_model)\",\"messages\":[{\"role\":\"user\",\"content\":\"$p\"}],\"max_tokens\":200,\"reasoning_effort\":\"none\"}" 2>/dev/null) || { ok=0; continue; }
+    printf '%s' "$out" | python3 -c 'import json,sys; d=json.load(sys.stdin); c=d["choices"][0]["message"]["content"]; print("ответ:", (c or "")[:60].strip() or "(ПУСТО)"); sys.exit(0 if (c or "").strip() else 1)' || ok=0
+  done
+  [ "$ok" = 1 ] || die "смоук не прошёл — смотри 'hfctl logs'"
+  echo "SMOKE: OK"
+}
+cur_model() { grep '^HIPFIRE_MODEL=' "$STACK_DIR/.env" | cut -d= -f2; }
+
+pull_model() {  # pull_model <tag> — идемпотентно (sha256-верификация внутри hipfire pull)
+  local tag="$1"
+  log "тяну модель $tag"
+  podman run --rm -v "$MODELS_DIR:/home/hipfire/.hipfire/models" "$IMAGE" \
+    hipfire pull "$tag" --yes 2>&1 | tail -2
+}
+
+# ── подкоманды ──────────────────────────────────────────────────────────────
+cmd_install() {
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --mode) MODE="$2"; shift 2 ;;
+      --model) MODEL_DEFAULT="qwen3.8:27b-$2"; shift 2 ;;
+      --slots) SLOTS="$2"; shift 2 ;;
+      *) die "неизвестный флаг install: $1" ;;
+    esac
+  done
+  case "$MODE" in single|slots) ;; *) die "--mode single|slots" ;; esac
+  preflight
+  write_stack_files
+  log "образ $IMAGE (если ещё не локально)"
+  podman image exists "$IMAGE" || podman pull "$IMAGE"
+  # обе модели + draft. Дефолтную дополнительно проверит init-сервис при up.
+  pull_model "$MODEL_DEFAULT"
+  [ "$MODEL_DEFAULT" = "$MODEL_ALT" ] || pull_model "$MODEL_ALT"
+  pull_model "$DRAFT_TAG"
+  compose up -d 2>&1 | tail -3
+  apply_mode "$MODE" "$SLOTS"
+  compose up -d --force-recreate 2>&1 | tail -3
+  wait_health 900
+  smoke
+  log "готов. Сервер: http://$BIND:$PORT (модель по умолчанию: $(cur_model), режим: $MODE)"
+  echo "Дальше: 'hfctl autostart' — автозапуск при загрузке; 'hfctl up|down|status|logs|mode|uninstall'"
+}
+
+cmd_up()   { compose up -d 2>&1 | tail -2; wait_health 600; }
+cmd_down() { compose stop 2>&1 | tail -2; echo "остановлен (контейнеры/файлы/образ целы)"; }
+
+cmd_status() {
+  echo "── контейнеры ──"
+  podman ps -a --filter "name=hipfire" --format 'table {{.Names}}\t{{.Status}}\t{{.Ports}}'
+  echo "── health ──"
+  curl -fsS -m 5 "http://127.0.0.1:$PORT/health" 2>/dev/null \
+    | python3 -c 'import json,sys;d=json.load(sys.stdin);c=d.get("capabilities",{});print("model:",d.get("model"),"| mode:",c.get("mode"),"| slots:",c.get("multi_slot_slots"),"| loading:",d.get("loading_model"))' \
+    || echo "(сервер не отвечает)"
+  echo "── автозапуск ──"
+  systemctl --user is-enabled "$UNIT_NAME.service" 2>/dev/null || echo "выключен"
+  loginctl show-user "$USER" --property=Linger 2>/dev/null || true
+}
+
+cmd_logs() { local n=80 a; for a in "$@"; do case "$a" in [0-9]*) n="$a";; esac; done; podman logs -t --tail "$n" "$CONTAINER" 2>&1; }
+
+cmd_mode() {
+  local m="${1:-}"; [ -n "$m" ] || die "использование: hfctl mode single|slots [N]"
+  apply_mode "$m" "${2:-2}"
+  compose up -d --force-recreate 2>&1 | tail -2
+  wait_health 600
+}
+
+cmd_autostart() {
+  local unit_dir="$HOME/.config/systemd/user" bin
+  bin="$(command -v podman)"
+  mkdir -p "$unit_dir"
+  cat > "$unit_dir/$UNIT_NAME.service" <<EOF
+[Unit]
+Description=hipfire serve (podman compose stack, hfctl)
+After=podman-user-wait-network-online.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+WorkingDirectory=$STACK_DIR
+ExecStart=$bin compose ${CF[*]} up -d
+ExecStop=$bin compose ${CF[*]} stop
+TimeoutStartSec=900
+Restart=on-failure
+RestartSec=30
+
+[Install]
+WantedBy=default.target
+EOF
+  systemctl --user daemon-reload
+  systemctl --user enable "$UNIT_NAME.service"
+  sudo loginctl enable-linger "$USER"
+  echo "автозапуск ВКЛ (unit: $UNIT_NAME.service, linger=yes)"
+}
+
+cmd_noautostart() {
+  systemctl --user disable --now "$UNIT_NAME.service" 2>/dev/null || true
+  rm -f "$HOME/.config/systemd/user/$UNIT_NAME.service"
+  systemctl --user daemon-reload
+  # linger глушим: в выключенном состоянии сервер не должен вскакивать при boot.
+  sudo loginctl disable-linger "$USER"
+  echo "автозапуск ВЫКЛ (юнит снят; инсталляция, образ и модели лежат нетронутые)"
+}
+
+cmd_uninstall() {
+  local purge_models=0 purge_image=0
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --purge-models) purge_models=1; shift ;;
+      --purge-image)  purge_image=1; shift ;;
+      *) die "неизвестный флаг uninstall: $1" ;;
+    esac
+  done
+  echo "uninstall снимет: контейнеры, сеть проекта, volumes (config/kernels),"
+  echo "юнит автозапуска, limits.d, каталог стека $STACK_DIR."
+  echo "Остаются: модели в $MODELS_DIR (см. --purge-models), образ $IMAGE (--purge-image),"
+  echo "группа render, сам podman."
+  read -r -p "Продолжить? [y/N] " a; [ "$a" = y ] || { echo "отменено"; exit 0; }
+  cmd_noautostart || true
+  ( cd "$STACK_DIR" 2>/dev/null && compose down 2>&1 | tail -2 ) || true
+  podman volume rm hipfire_hipfire-config hipfire_hipfire-kernels 2>/dev/null || true
+  rm -rf "$STACK_DIR"
+  if [ -f /etc/security/limits.d/99-hipfire-memlock.conf ]; then
+    sudo rm -f /etc/security/limits.d/99-hipfire-memlock.conf
+  fi
+  if [ "$purge_models" = 1 ]; then rm -rf "$MODELS_DIR"; echo "модели удалены"; fi
+  if [ "$purge_image" = 1 ];  then podman rmi "$IMAGE" 2>/dev/null || true; echo "образ удалён"; fi
+  echo "uninstall DONE"
+}
+
+usage() {
+  sed -n '2,16p' "$0" | sed 's/^# \{0,1\}//'
+  cat <<EOF
+переменные окружения: HFCTL_IMAGE HFCTL_DIR HFCTL_MODELS HFCTL_PORT HFCTL_BIND HFCTL_MODEL
+EOF
+}
+
+cmd="${1:-}"; shift || true
+case "$cmd" in
+  install)      cmd_install "$@" ;;
+  up)           cmd_up ;;
+  down)         cmd_down ;;
+  status)       cmd_status ;;
+  logs)         cmd_logs "$@" ;;
+  mode)         cmd_mode "$@" ;;
+  autostart)    cmd_autostart ;;
+  noautostart)  cmd_noautostart ;;
+  uninstall)    cmd_uninstall "$@" ;;
+  *)            usage ;;
+esac

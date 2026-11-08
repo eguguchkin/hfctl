@@ -280,6 +280,35 @@ prompt merge_sort md5 `253c7ac5`; свежие процессы ×3.
   политика — мягкая аффинность с переключением при глубокой очереди
   (цена = пере-префилл истории, секунды).
 
+## hfctl — end-user деплой (одна команда на голом Ubuntu/Debian)
+
+`hfctl` (в корне hfbox) — автономный однофайловый CLI для «голого» ПК:
+копируется целиком (`scp hfctl user@host:`) и запускается на ЦЕЛЕВОЙ машине
+от обычного юзера (не из ocbox, не через ssh-паттерн hfbox-скриптов).
+
+```
+bash hfctl install [--mode single|slots] [--model mq6|mq4] [--slots N]
+bash hfctl up | down | status | logs [N] | mode single|slots [N]
+bash hfctl autostart | noautostart
+bash hfctl uninstall [--purge-models] [--purge-image]
+```
+
+- install: префлайт (Ubuntu/Debian, /dev/kfd, apt podman+podman-compose,
+  группа render (+перелогин exit 42), limits.d memlock (+ребут exit 42),
+  linger) → генерация **встроенных** compose-файлов (upstream hipfire 0.4.5,
+  monitoring-профили срезаны) + .env + compose.local.yml (DFlash draft env;
+  prompts-маунт, если каталог есть) → pull образа → **обе модели**
+  (mq6-xt + mq4-xts) + dflash-mq4 draft → конфиг-профиль через
+  `podman compose run --rm --no-deps` (volume проекта гарантирован) →
+  force-recreate → wait_health → smoke. Идемпотентен.
+- Переподнимание при краше: `restart: unless-stopped` в compose.yml (за
+  podman); systemd-unit (autostart) — только на boot, Restart=on-failure.
+- noautostart снимает и linger (выключенный сервер не вскакивает при boot);
+  файлы/образ/модели целы. uninstall — слоёный: по умолчанию щадит модели и
+  образ (--purge-models/--purge-image), снимает контейнеры, volumes
+  config/kernels, юнит, limits.d, каталог стека.
+- Переменные: HFCTL_IMAGE/_DIR/_MODELS/_PORT/_BIND/_MODEL в шапке файла.
+
 ## Скрипты (в этом репозитории)
 
 Все запускаются с локальной машины (контейнер ocbox), они сами делают
