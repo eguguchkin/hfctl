@@ -544,6 +544,7 @@ cmd_use() {
   if ! wait_health 600; then
     # движок отказал в загрузке (admission/refusal): откатываем канон на прежний
     warn "профиль $p НЕ поднялся — откат канона на $prev_prof ($prev_model)"
+    set_models_dir "$prev_prof"          # сет прежнего профиля (маунт тоже!)
     write_env "$prev_prof" "$prev_model"
     return 1
   fi
