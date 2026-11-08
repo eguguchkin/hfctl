@@ -44,11 +44,14 @@ MEMLOCK=1318060032
 
 # ── профили ─────────────────────────────────────────────────────────────────
 # Формат: default_model|all_models (пробел)|draft_tag ('-' = нет)|min_ram_gib|описание
-# Канонические id — spec/hfctl.md §5; flash-multi добавляется этапом 2.
-PROFILE_LIST="27b-single 27b-slots"
+# Канонические id — spec/hfctl.md §5.
+PROFILE_LIST="27b-single 27b-slots flash-multi"
 profile_27b_single="qwen3.8:27b-mq4-xts|qwen3.8:27b-mq4-xts qwen3.8:27b-mq6-xt|qwen3.8:27b-draft-mq4|58|singleton+DFlash (максимум соло-скорости)"
 profile_27b_slots="qwen3.8:27b-mq4-xts|qwen3.8:27b-mq4-xts qwen3.8:27b-mq6-xt|qwen3.8:27b-draft-mq4|58|multi_slot ${SLOTS}×${MAX_SEQ} (HOL-изоляция; −25% агрегат)"
+profile_flash_multi="qwen3.8:flash-next-mq4-xts|qwen3.8:flash-next-mq4-xts|-|80|Flash-Next mq4-xts, VMM fn-lanes (настоящий батчинг; требует ≥80 GiB пула)"
 PROFILE_DEFAULT=27b-single
+# порог RAM-гейта flash проверяется по field 4; 80 = 72 (мин. реестра) + запас
+# (lane store + OS); калибруется на 128 GB-машине (spec/plan.md этап 4).
 
 profile_field() {  # profile_field <id> <N> — N-е поле профиля (1-based, '|')
   local name="profile_$(echo "$1" | tr '-' '_')" v
@@ -60,8 +63,36 @@ resolve_profile() {  # нормализация алиасов → канони�
   case "$1" in
     27b-single|single|mq6|mq4) echo 27b-single ;;
     27b-slots|slots)           echo 27b-slots ;;
+    flash-multi|flash|flash-next|multi) echo flash-multi ;;
     *) return 1 ;;
   esac
+}
+
+# ── гейты профиля (spec §6): отказ ДО скачивания, с цифрами ─────────────────
+ram_pool_gib() {  # весь доступный пул (APU: MemTotal; iGPU делит LPDDR с ОС)
+  awk '/MemTotal/{printf "%d", $2/1048576}' /proc/meminfo
+}
+profile_gate() {  # profile_gate <id> — RAM-гейт; die с цифрами при отказе
+  local prof="$1" need have
+  need=$(profile_field "$prof" 4); have=$(ram_pool_gib)
+  [ "$have" -ge "$need" ] || {
+    echo "ERROR: профиль $prof требует ≥${need} GiB единого пула памяти" >&2
+    case "$prof" in
+      flash-multi) echo "       (flash-next mq4-xts: 70.9 GB резидентно целиком;" >&2
+                   echo "        offload на APU не добавляет ёмкости — это та же память;" >&2
+                   echo "        + lane store для батчинга)" >&2 ;;
+    esac
+    echo "       На этой машине: ${have} GiB. Доступные профили: $(profile_avail_list)" >&2
+    exit 1
+  }
+}
+# какие профили проходят RAM-гейт на этой машине (для текстов отказа и doctor)
+profile_avail_list() {
+  local p out=""
+  for p in $PROFILE_LIST; do
+    [ "$(ram_pool_gib)" -ge "$(profile_field "$p" 4)" ] && out="$out $p"
+  done
+  echo "${out:-—}"
 }
 
 log()  { printf '\n\033[1;36m== %s\033[0m\n' "$*"; }
@@ -203,18 +234,20 @@ services:
         hard: 1318060032
 HALO
 
-  # compose.local.yml: DFlash-wiring (mq6-xt не объявляет sidecar в реестре;
-  # MQ4 draft — рекомендованный контроллер). Пустое значение = DFlash выключен.
-  # (этап 2: сделать условным по draft-полю профиля)
-  local prompt_vol=""
+  # compose.local.yml: DFlash-wiring для профилей с draft (mq6-xt не объявляет
+  # sidecar в реестре; MQ4 draft — рекомендованный контроллер). Профили без
+  # draft (flash-multi: native MTP) получают пустой env = DFlash выключен.
+  local prompt_vol="" draft_env=""
   [ -d "$STACK_DIR/benchmarks/prompts" ] && prompt_vol="
     volumes:
       - ./benchmarks/prompts:/prompts:ro"
+  local cur_draft; cur_draft=$(profile_field "$(cur_profile)" 3)
+  [ "$cur_draft" != "-" ] && [ -n "$cur_draft" ] && draft_env="      HIPFIRE_DFLASH_DRAFT: $DRAFT_FILE"
   cat > "$STACK_DIR/compose.local.yml" <<EOF
 services:
   hipfire:$prompt_vol
     environment:
-      HIPFIRE_DFLASH_DRAFT: $DRAFT_FILE
+$draft_env
 EOF
 }
 
@@ -244,16 +277,30 @@ apply_profile() {  # apply_profile <id> — ключи движка из таб�
   log "профиль движка: $prof ($(profile_field "$prof" 5))"
   cfgset memory.max_seq "$MAX_SEQ"
   cfgset memory.session_cache_disk_bytes 34359738368
-  cfgset speculation.dflash on
   case "$prof" in
     27b-slots)
+      cfgset speculation.dflash on
       cfgset serve.multi_slot true
       cfgset serve.multi_slot_slots "$SLOTS"
       cfgset serve.multi_slot_ctx "$MAX_SEQ"
       cfgset serve.continuous_batch_size 1
       cfgset serve.vmm_batch false
+      cfgset serve.batch_nonexact false
+      ;;
+    flash-multi)
+      # VMM continuous batching (fn-lanes, Qwen4): spec/hfctl.md §5.
+      # При отказе lanes движок сам печатает 'qwen4 lanes refused: … —
+      # fallback to sequential' и живёт serial (проверка в check_route).
+      cfgset speculation.dflash off          # у flash native MTP; роут решает движок
+      cfgset serve.multi_slot false
+      cfgset serve.multi_slot_slots 2
+      cfgset serve.multi_slot_ctx "$MAX_SEQ"
+      cfgset serve.continuous_batch_size 4
+      cfgset serve.vmm_batch true
+      cfgset serve.batch_sampled true
       ;;
     *)  # 27b-single (default)
+      cfgset speculation.dflash on
       cfgset serve.multi_slot false
       cfgset serve.multi_slot_slots 4
       cfgset serve.multi_slot_ctx "$MAX_SEQ"
@@ -303,6 +350,31 @@ smoke() {
   echo "SMOKE: OK"
 }
 
+check_route() {  # check_route <profile> — фактический роут (spec §7): движок
+  # может вежливо деградировать (vmm lanes refused → serial) — показываем реальность
+  local prof="$1" line
+  line=$(printf '%s' "$(curl -fsS -m 5 "http://127.0.0.1:$PORT/health" 2>/dev/null)" | python3 -c 'import json,sys
+d=json.load(sys.stdin); c=d.get("capabilities",{})
+print("|".join(str(c.get(k)) for k in ("mode","continuous_batch_route","continuous_batch_capable")))' 2>/dev/null || echo "|||")
+  local mode croute ccap
+  mode=${line%%|*}; line=${line#*|}; croute=${line%%|*}; ccap=${line##*|}
+  case "$prof" in
+    flash-multi)
+      if [ "$croute" = "vmm" ]; then
+        echo "lanes: vmm (настоящий батчинг, cbs=4) — принят"
+      elif [ "$ccap" = "False" ] || [ "$croute" = "None" ]; then
+        warn "vmm lanes НЕ приняты на этом GPU ($croute/$ccap) — сервер работает serial (fallback)"
+        warn "если лог содержит 'qwen4 lanes refused:' — смотри 'hfctl logs'"
+      else
+        echo "батч-роут: ${croute:-нет данных} (capabilities: mode=$mode)"
+      fi
+      ;;
+    27b-slots)  echo "роут: multi_slot ($mode)" ;;
+    *)          [ "$croute" = "vmm" ] && echo "роут: singleton, DFlash (vmm-батчинг готов как резерв)" \
+                                        || echo "роут: singleton serial ($mode)" ;;
+  esac
+}
+
 pull_model() {  # pull_model <tag> — идемпотентно (sha256-верификация внутри hipfire pull)
   local tag="$1"
   log "тяну модель $tag"
@@ -346,6 +418,7 @@ cmd_install() {
     v=$(env_val HIPFIRE_MODELS_PATH); [ -n "$v" ] && [ "$set_models" = 0 ] && MODELS_DIR="$v"
   fi
   prof=$(resolve_profile "${prof:-$PROFILE_DEFAULT}") || die "неизвестный профиль '$prof' (доступны: $PROFILE_LIST)"
+  profile_gate "$prof"          # RAM-гейт: отказ ДО любого скачивания (spec §6)
   preflight
   write_stack_files
   # приоритет: HFCTL_MODEL > сохранённая при миграции модель > дефолт профиля
@@ -359,6 +432,7 @@ cmd_install() {
   compose up -d --force-recreate 2>&1 | tail -3
   wait_health 900
   smoke
+  check_route "$prof"
   if [ "$no_autostart" = 1 ]; then
     echo "(автозапуск не включён — '--no-autostart'; включить: hfctl on)"
   else
@@ -373,6 +447,7 @@ cmd_use() {
   [ -n "$p" ] || die "использование: hfctl use <profile> (${PROFILE_LIST// /|})"
   [ -f "$STACK_DIR/.env" ] || die "стек не установлен — сначала 'hfctl install'"
   p=$(resolve_profile "$p") || die "неизвестный профиль '$p' (доступны: $PROFILE_LIST)"
+  profile_gate "$p"             # RAM-гейт: отказ ДО любого скачивания (spec §6)
   # порт/bind/путь — из текущего .env (use не трогает параметры, только профиль)
   local v
   v=$(env_val HIPFIRE_PORT);        [ -n "$v" ] && PORT="$v"
@@ -387,6 +462,7 @@ cmd_use() {
   compose up -d --force-recreate 2>&1 | tail -2
   wait_health 600
   smoke
+  check_route "$p"
   log "профиль $p активен (конфиг автозапуска обновлён — переживёт рестарт)"
 }
 
@@ -565,6 +641,74 @@ cmd_watchdog() {
   fi
 }
 
+cmd_doctor() {  # диагностика без изменений (spec §3): gейты + что мешает
+  local have; have=$(ram_pool_gib)
+  echo "── система ──"
+  . /etc/os-release && echo "ОС: $PRETTY_NAME"
+  echo "память: пул ${have} GiB (MemTotal); доступно сейчас: $(awk '/MemAvailable/{printf "%d", $2/1048576}' /proc/meminfo) GiB"
+  echo "GPU: /dev/kfd $([ -e /dev/kfd ] && echo есть || echo НЕТ), /dev/dri/renderD* $(compgen -G '/dev/dri/renderD*' >/dev/null && echo есть || echo НЕТ)"
+  echo "── профили (RAM-гейт) ──"
+  local p
+  for p in $PROFILE_LIST; do
+    local need; need=$(profile_field "$p" 4)
+    if [ "$have" -ge "$need" ]; then
+      echo "  $p: доступен (нужно ≥${need} GiB)"
+    else
+      echo "  $p: НЕДОСТУПЕН (нужно ≥${need} GiB, есть ${have})"
+    fi
+  done
+  echo "── установка ──"
+  if [ -f "$STACK_DIR/.env" ]; then
+    echo "стек: $STACK_DIR (профиль $(cur_profile), модель $(cur_model))"
+  else
+    echo "стек: НЕ УСТАНОВЛЕН ($STACK_DIR/.env нет) — 'hfctl install'"
+  fi
+  echo "── окружение ──"
+  command -v podman >/dev/null && echo "podman: $(podman --version)" || echo "podman: НЕТ (install поставит)"
+  command -v podman-compose >/dev/null && echo "podman-compose: есть" || echo "podman-compose: НЕТ (install поставит)"
+  id -nG | grep -qw render && echo "группа render: есть" || echo "группа render: НЕТ (install добавит, перелогин)"
+  local lim="/etc/security/limits.d/99-hipfire-memlock.conf"
+  [ -f "$lim" ] && echo "memlock limits: есть ($lim)" || echo "memlock limits: НЕТ (install напишет, ребут)"
+  # gpu-lock: эксклюзивен — чужой держатель = отказ запуска
+  local lockdir="/run/lock/hipfire" f
+  if [ -d "$lockdir" ]; then
+    for f in "$lockdir"/gpu-pci-*.lock; do
+      [ -e "$f" ] || continue
+      if fuser -v "$f" 2>&1 | grep -q hipfire; then
+        warn "gpu-lock занят: $f ($(fuser -v "$f" 2>&1 | tail -1)) — второй serve не стартует"
+      else
+        echo "gpu-lock: свободен ($f)"
+      fi
+    done
+  fi
+  echo "── health ──"
+  curl -fsS -m 5 "http://127.0.0.1:$PORT/health" 2>/dev/null | head -c 200 || echo "(сервер не отвечает)"
+  echo
+}
+
+cmd_models() {  # что скачано и что требует каждый профиль (spec §3)
+  echo "── на диске ($MODELS_DIR) ──"
+  if [ -d "$MODELS_DIR" ]; then
+    du -sh "$MODELS_DIR" 2>/dev/null
+    ls -lh "$MODELS_DIR" 2>/dev/null | awk 'NR>1 {printf "  %-52s %s\n", $NF, $5}' | grep -v '^  \^\?' || true
+  else
+    echo "(каталога нет — ничего не скачано)"
+  fi
+  echo "── профили: что докачать ──"
+  local p have; have=$(ram_pool_gib)
+  for p in $PROFILE_LIST; do
+    local need avail="доступен"
+    [ "$have" -ge "$(profile_field "$p" 4)" ] || avail="НЕДОСТУПЕН (RAM ${have} < ${need} GiB)"
+    local missing="" tag
+    for tag in $(profile_field "$p" 2) $(profile_field "$p" 3 | grep -v '^-$'); do
+      # имя файла из тега: hipfire pull кладёт <имя>.<квант>; проверяем по ls диска
+      [ -n "$(ls "$MODELS_DIR" 2>/dev/null | grep -F "$(basename "${tag//-/:}" | head -c 20)" | head -1)" ] || missing="$missing $tag"
+    done
+    echo "  $p [$avail]${missing:+  докачать:$missing}"
+  done
+  echo "(точный расчёт докачки — при 'hfctl install/use': pull идемпотентен, скачанное пропускает)"
+}
+
 cmd_uninstall() {
   local purge_models=0 purge_image=0
   while [ $# -gt 0 ]; do
@@ -611,6 +755,8 @@ case "$cmd" in
   off)          cmd_off ;;
   status)       cmd_status "$@" ;;
   logs)         cmd_logs "$@" ;;
+  doctor)       cmd_doctor ;;
+  models)       cmd_models ;;
   up)           cmd_up ;;          # скрытый алиас
   down)         cmd_down ;;        # скрытый алиас
   mode)         cmd_mode "$@" ;;   # скрытый алиас
@@ -620,6 +766,6 @@ case "$cmd" in
   _boot)        cmd_boot ;;
   uninstall)    cmd_uninstall "$@" ;;
   "")           usage ;;
-  *)            echo "неизвестная команда '$cmd'. Команды: install | use <profile> | status [--json] | logs | on | off | uninstall" \
+  *)            echo "неизвестная команда '$cmd'. Команды: install | use <profile> | status [--json] | logs | on | off | doctor | models | uninstall" \
                   " (алиасы: up|down|mode|autostart|noautostart). Профили: $PROFILE_LIST" >&2; exit 1 ;;
 esac
