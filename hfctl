@@ -144,6 +144,14 @@ preflight() {
   fi
 }
 
+# ── неинтерактив: вопросы только при TTY (--yes — авто-да) ──────────────────
+ASSUME_YES="${HFCTL_YES:-}"
+ask() {  # ask <question> — 0 при да; при не-TTY и без --yes — отказ (безопасно)
+  [ "$ASSUME_YES" = 1 ] && return 0
+  if [ ! -t 0 ]; then echo "(неинтерактивный режим: авто-нет; повтори с --yes)"; return 1; fi
+  local a; read -r -p "$1" a; [ "$a" = y ]
+}
+
 # ── файлы стека (встраиваю официальные compose-файлы hipfire 0.4.5) ─────────
 write_stack_files() {
   log "стек в $STACK_DIR"
@@ -402,7 +410,8 @@ cmd_install() {
       --bind)        BIND="$2"; set_bind=1; shift 2 ;;
       --models-dir)  MODELS_DIR="$2"; set_models=1; shift 2 ;;
       --no-autostart) no_autostart=1; shift ;;
-      *) die "неизвестный флаг install: $1 (доступны: --profile ${PROFILE_LIST// /|} --port --bind --models-dir --no-autostart)" ;;
+      --yes)         ASSUME_YES=1; shift ;;
+      *) die "неизвестный флаг install: $1 (доступны: --profile ${PROFILE_LIST// /|} --port --bind --models-dir --no-autostart --yes)" ;;
     esac
   done
   # миграция v1-.env (нет HFCTL_PROFILE): сохраняем текущую модель/порт/bind/путь
@@ -439,7 +448,19 @@ cmd_install() {
     cmd_autostart
   fi
   log "готов. Сервер: http://$BIND:$PORT | профиль: $prof | модель по умолчанию: $(cur_model)"
-  echo "Дальше: 'hfctl use <profile>' — сменить профиль; 'hfctl off' — остановить; 'hfctl status'"
+  cat <<EOF
+
+── как пользоваться ──────────────────────────────────────────────
+Клиент (OpenAI-совместимый):  base_url = http://$BIND:$PORT/v1
+Список моделей:  curl http://127.0.0.1:$PORT/v1/models
+Проверка:
+  curl http://127.0.0.1:$PORT/v1/chat/completions -H 'Content-Type: application/json' \\
+    -d '{"model":"$(cur_model)","messages":[{"role":"user","content":"привет"}],"max_tokens":400,"reasoning_effort":"none"}'
+
+Сменить профиль:  hfctl use <profile>     (${PROFILE_LIST// /|})
+Остановить/вернуть: hfctl off / hfctl on   Снести: hfctl uninstall
+Диагностика: hfctl doctor | hfctl status | hfctl logs -f
+EOF
 }
 
 cmd_use() {
@@ -717,7 +738,7 @@ cmd_uninstall() {
   echo "Модели $MODELS_DIR: $([ "$purge_models" = 1 ] && echo 'УДАЛЯЮТСЯ (--purge-models)' || echo 'СОХРАНЯЮТСЯ (переезжают в стеке)')"
   echo "Образ $IMAGE: $([ "$purge_image" = 1 ] && echo 'УДАЛЯЕТСЯ (--purge-image)' || echo 'остаётся (--purge-image — удалить)')"
   echo "Не трогаем: podman, группа render, чужие каталоги."
-  read -r -p "Продолжить? [y/N] " a; [ "$a" = y ] || { echo "отменено"; exit 0; }
+  ask "Продолжить? [y/N] " || { echo "отменено"; exit 0; }
   cmd_off || true
   ( cd "$STACK_DIR" 2>/dev/null && compose down 2>&1 | tail -2 ) || true
   podman volume rm hipfire_hipfire-config hipfire_hipfire-kernels 2>/dev/null || true

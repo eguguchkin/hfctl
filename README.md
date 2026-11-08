@@ -1,0 +1,76 @@
+# hfctl — сервер hipfire на Ubuntu/Debian одной командой
+
+`hfctl` ставит и обслуживает [hipfire](https://github.com/warpfront/hipfire)
+(LLM-сервер для AMD Strix Halo / gfx11xx, официальный контейнер ghcr) на
+голой машине: preflight, скачивание моделей, конфиг, systemd-автозапуск,
+вотчдог крашей, переключение профилей — всё от обычного юзера (sudo точечно,
+два места: группа render + memlock).
+
+## Быстрый старт
+
+```bash
+git clone https://github.com/ORG/hfctl.git
+cd hfctl
+./install.sh          # кладёт hfctl в ~/.local/bin (без sudo)
+hfctl doctor          # (опционально) проверка железа до скачивания
+hfctl install         # сервер: ~34 GB моделей, потом healthy + smoke
+```
+
+Одной строкой (вместо clone): `curl -fsSL <raw_url>/install.sh | bash`.
+
+После `hfctl install` сервер на `http://<IP>:11435` (LAN, без ключа),
+автозапуск при загрузке включён, падения поднимает вотчдог.
+
+```bash
+curl http://<IP>:11435/v1/chat/completions -H 'Content-Type: application/json' \
+  -d '{"model":"qwen3.8:27b-mq4-xts","messages":[{"role":"user","content":"привет"}],"max_tokens":400,"reasoning_effort":"none"}'
+```
+
+Любой OpenAI-совместимый клиент: `base_url = http://<IP>:11435/v1`,
+список моделей — `curl http://<IP>:11435/v1/models`.
+
+## Команды
+
+| Команда | Что делает |
+|---|---|
+| `hfctl install [--profile P] [--port N] [--bind A] [--models-dir D] [--no-autostart]` | развернуть/починить инсталляцию (идемпотентно) + автозапуск |
+| `hfctl use <profile>` | переключить профиль; заменяет конфиг автозапуска — выбор переживает рестарт |
+| `hfctl status [--json]` | профиль, health, автозапуск, контейнеры |
+| `hfctl logs [-f] [-n N]` | логи сервера |
+| `hfctl on` / `hfctl off` | автозапуск вкл / стоп+снятие (файлы и модели целы) |
+| `hfctl doctor` | диагностика без изменений (железо, профили, gpu-lock) |
+| `hfctl models` | что скачано, доступность профилей |
+| `hfctl uninstall [--purge-models] [--purge-image]` | снести всё (по умолчанию модели и образ щадит) |
+
+## Профили
+
+| Профиль | Что внутри | Требования |
+|---|---|---|
+| `27b-single` *(default)* | Qwen3.8-27B: `mq4-xts` (быстрее) + `mq6-xt` (качественнее), DFlash-спекуляция, singleton | ~60 GiB пула |
+| `27b-slots` | те же модели, multi_slot 2×262144 | ~60 GiB |
+| `flash-multi` | Qwen3.8 Flash-Next `mq4-xts`, VMM continuous batching (fn-lanes) | ≥80 GiB пула |
+
+Переключение в любой момент: `hfctl use flash-multi` — недостающие модели
+докачаются (с вопросом), скачанное не удаляется. На машинах, где профиль не
+помещается, hfctl откажет с цифрами **до** скачивания.
+
+## Как это устроено
+
+- Всё в одном каталоге `~/hipfire/`: `hfctl`, `models/`, compose-файлы,
+  `.env`. Вне каталога: systemd user юниты, контейнеры/volumes podman,
+  `/etc/security/limits.d/99-hipfire-memlock.conf`, группа `render`, linger.
+- Автозапуск: systemd user unit (boot) + watchdog-таймер 1 мин (краши;
+  rootless podman не переживает отсоединение compose, поэтому надзор внешний).
+- Модели тянет официальный `hipfire pull` (sha256-верификация, идемпотентно).
+- Явная остановка — только `hfctl off` (иначе вотчдог поднимет контейнер).
+
+## Если что-то пошло не так
+
+- `hfctl doctor` — первая точка диагностики.
+- install печатает «шаг 2 из 2: повтори после ребута/перелогина» — так и
+  сделать: группа render и memlock применяются только к новым сессиям.
+- Сервер не здоров: `hfctl logs -f` и `hfctl status`.
+- Модель в ответах «думает дольше ответа»: у клиентов с маленьким
+  `max_tokens` ставь `reasoning_effort:"none"` (или `max_tokens ≥ 400`).
+
+Детали и спецификация: `spec/hfctl.md` (UX), `spec/plan.md` (план/DoD).
