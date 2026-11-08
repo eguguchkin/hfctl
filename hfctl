@@ -354,7 +354,10 @@ EOF
 }
 
 cmd_noautostart() {
-  systemctl --user disable --now "$UNIT_NAME.service" 2>/dev/null || true
+  # Юнит oneshot контейнеры не держит (compose up -d отсоединён) — останавливаем
+  # стек напрямую, иначе ExecStop не выполнится для уже завершённого юнита.
+  compose stop >/dev/null 2>&1 || true
+  systemctl --user disable "$UNIT_NAME.service" 2>/dev/null || true
   rm -f "$HOME/.config/systemd/user/$UNIT_NAME.service"
   systemctl --user daemon-reload
   # linger глушим: в выключенном состоянии сервер не должен вскакивать при boot.

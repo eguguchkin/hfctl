@@ -137,7 +137,10 @@ multi-slot — см. факты).
    ответов, либо давать max_tokens ≥ 400.
 2. **serve_harness.py требует КОНТЕЙНЕРНЫЙ путь модели**
    (`/home/hipfire/.hipfire/models/qwen3.8-27b.mq4-xts`), иначе 404. Режим
-   флагом `--mode battery|chain` (не позиционный).
+   флагом `--mode battery|chain` (не позиционный). Общий класс ошибки: ЛЮБОЙ
+   путь к файлу модели, который видит контейнер (env `HIPFIRE_DFLASH_DRAFT`,
+   аргументы harness), — контейнерный (`/home/hipfire/.hipfire/models/...`),
+   т.к. host-каталог смонтирован туда (hfctl наступил дважды-подобное).
 3. **Prompt-фикстура**: `benchmarks/prompts/merge_sort_thinking_off.txt`,
    md5 `253c7ac5`. Ничего не редактировать в ней — любая правка байтов
    меняет md5 и τ. Для сравнений — только с зафиксированным хешем.
