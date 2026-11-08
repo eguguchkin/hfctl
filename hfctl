@@ -409,9 +409,13 @@ cmd_boot() {
   for i in $(seq 1 24); do
     # ядро ROCm — renderD*; у Halo может не быть card0 вообще (нумерация с 1)
     if ! compgen -G "/dev/dri/renderD*" >/dev/null || [ ! -e /dev/kfd ]; then sleep 10; continue; fi
-    if hf_up_locked && [ "$(podman inspect -f '{{.State.Status}}' "$CONTAINER" 2>/dev/null)" = running ]; then
+    if hf_up_locked; then :; fi
+    if [ "$(podman inspect -f '{{.State.Status}}' "$CONTAINER" 2>/dev/null)" = running ]; then
       return 0
     fi
+    # не поднялся: возможно,devices востребовались иначе (перенумерация
+    # /dev/dri между загрузками) — пересоздаём контейнер раз в 3 попытки
+    [ $((i % 3)) -eq 0 ] && ( flock -n 9 || true; compose up -d --force-recreate 2>&1 | tail -1 ) 9>"$STACK_DIR/.hfctl.lock" || true
     sleep 10
   done
   echo "boot: контейнер так и не запущен за 4 мин" >&2
