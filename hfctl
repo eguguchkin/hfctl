@@ -348,7 +348,8 @@ cmd_install() {
   prof=$(resolve_profile "${prof:-$PROFILE_DEFAULT}") || die "неизвестный профиль '$prof' (доступны: $PROFILE_LIST)"
   preflight
   write_stack_files
-  MODEL_DEFAULT="${HFCTL_MODEL:-$(profile_field "$prof" 1)}"
+  # приоритет: HFCTL_MODEL > сохранённая при миграции модель > дефолт профиля
+  MODEL_DEFAULT="${HFCTL_MODEL:-${MODEL_DEFAULT:-$(profile_field "$prof" 1)}}"
   write_env "$prof" "$MODEL_DEFAULT"
   log "образ $IMAGE (если ещё не локально)"
   podman image exists "$IMAGE" || podman pull "$IMAGE"
@@ -379,7 +380,7 @@ cmd_use() {
   v=$(env_val HIPFIRE_MODELS_PATH); [ -n "$v" ] && MODELS_DIR="$v"
   preflight
   pull_profile_models "$p"
-  MODEL_DEFAULT=$(profile_field "$p" 1)
+  MODEL_DEFAULT="${HFCTL_MODEL:-$(profile_field "$p" 1)}"
   write_env "$p" "$MODEL_DEFAULT"
   compose up -d 2>&1 | tail -2      # контейнеры могут быть остановлены (off)
   apply_profile "$p"
