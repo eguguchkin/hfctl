@@ -288,6 +288,12 @@ prompt merge_sort md5 `253c7ac5`; свежие процессы ×3.
 `hfctl` (в корне hfbox) — автономный однофайловый CLI для «голого» ПК:
 копируется целиком (`scp hfctl user@host:`) и запускается на ЦЕЛЕВОЙ машине
 от обычного юзера (не из ocbox, не через ssh-паттерн hfbox-скриптов).
+**Вся инсталляция в одном каталоге `~/hipfire/`**: бинарь `~/hipfire/hfctl`
+(копия, которой поставлено), модели `~/hipfire/models/`, compose-файлы, .env,
+`.hfctl-stopped` (маркер явной остановки), `.hfctl-watchdog.log`.
+Вне каталога остаются только: юниты `~/.config/systemd/user/hipfire-compose*`,
+image ghcr, podman volumes/network, `/etc/security/limits.d/99-hipfire-memlock.conf`,
+группа render, linger.
 
 ```
 bash hfctl install [--mode single|slots] [--model mq6|mq4] [--slots N]
