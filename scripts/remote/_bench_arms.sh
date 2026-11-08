@@ -19,7 +19,7 @@ podman run --rm --entrypoint md5sum "$IMAGE" /usr/local/bin/hipfire /opt/hipfire
 $F stop hipfire >/dev/null 2>&1 || true
 trap '$F start hipfire >/dev/null 2>&1 || true' EXIT
 
-for arm in off dflash; do
+for arm in ${HF_ARMS:-off dflash}; do
   for i in 1 2 3; do
     $F run --rm --no-deps hipfire hipfire bench "$MODEL" --spec "$arm" \
       --runs 3 --warmups 1 --max-tokens 256 --backend noslots --workload stateless \
@@ -35,6 +35,7 @@ d, _ = json.JSONDecoder().raw_decode(raw[m.start():])
 s = d.get("samples", {})
 print("prompt_md5:", d.get("prompt_md5"),
       "| decode tok/s:", s.get("decode"),
+      "| tau:", d.get("spec_tau"),
       "| prefill tok/s:", s.get("prefill"),
       "| ttft_ms:", s.get("ttft_ms"))
 PY

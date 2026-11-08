@@ -12,10 +12,15 @@ hfssh() {
 }
 
 # hfssh_run <local-script-file> [args...] — исполнить файл как bash -s на хосте.
+# Дополнительные пробрасываемые переменные: HF_DFLASH_DRAFT (выбор DFlash
+# draft'а в compose.local.yml) — пустое/unset на хосте = дефолт скрипта.
 hfssh_run() {
   local script="$1"; shift
+  local extra=()
+  [ -n "${HF_DFLASH_DRAFT:-}" ] && extra+=(HF_DFLASH_DRAFT="$HF_DFLASH_DRAFT")
+  [ -n "${HF_ARMS:-}" ] && extra+=(HF_ARMS="$HF_ARMS")
   ssh -i "$HF_KEY" -o BatchMode=yes -o ConnectTimeout=10 "$HF_HOST" \
-    env HF_STACK="$HF_STACK" bash -s -- "$@" < "$script"
+    env HF_STACK="$HF_STACK" "${extra[@]}" bash -s -- "$@" < "$script"
 }
 
 hf_die() { echo "hfbox: ERROR: $*" >&2; exit 1; }

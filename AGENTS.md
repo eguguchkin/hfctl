@@ -166,6 +166,12 @@ prompt merge_sort md5 `253c7ac5`; свежие процессы ×3.
 - Артефакты: `.local-analysis/bench_mq6.txt`, `~/bench-runs/`.
 - Параллельные замеры FIFO-vs-slots (таблица выше) тоже сняты на mq4-xts;
   относительные выводы для mq6-xt ожидаемо те же.
+- **A/B драфта на mq6-xt** (2026-11-08): `qwen38-27b-dflash-mq6.hfq`
+  (sha256 `d190ef2f…9015`, скачан) даёт τ=11.83 (тот же) и decode
+  **73.5 tok/s против 75.3** у MQ4-draft → прод остаётся на MQ4-draft
+  (дефолт в `_config_prod.sh`); переключение драфта: env
+  `HF_DFLASH_DRAFT=<путь>` через `config_prod.sh` + recreate
+  (`scripts/bench_arms.sh` теперь принимает `HF_ARMS=off|dflash`).
 - Проза: τ~2–3, decode 30–60 tok/s.
 - battery: attractor=0, retrieval_miss=0. chain: кэш сессий работает
   (cached 442→1323).
