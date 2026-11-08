@@ -32,6 +32,8 @@ MODE="single"                                    # single | slots (--mode)
 SLOTS=2                                          # для slots (--slots N; 4x262144 не влезает в OOM-guard)
 CONTAINER=hipfire_hipfire_1
 UNIT_NAME=hipfire-compose
+STOP_MARKER="$STACK_DIR/.hfctl-stopped"   # явная остановка: вотчдог не встаёт
+SELF="$(readlink -f "$0")"
 MAX_SEQ=262144
 MEMLOCK=1318060032
 
@@ -301,8 +303,8 @@ cmd_install() {
   echo "Дальше: 'hfctl autostart' — автозапуск при загрузке; 'hfctl up|down|status|logs|mode|uninstall'"
 }
 
-cmd_up()   { compose up -d 2>&1 | tail -2; wait_health 600; }
-cmd_down() { compose stop 2>&1 | tail -2; echo "остановлен (контейнеры/файлы/образ целы)"; }
+cmd_up()   { rm -f "$STOP_MARKER"; compose up -d 2>&1 | tail -2; wait_health 600; }
+cmd_down() { touch "$STOP_MARKER"; compose stop 2>&1 | tail -2; echo "остановлен (контейнеры/файлы/образ целы; вотчдог молчит до 'hfctl up')"; }
 
 cmd_status() {
   echo "── контейнеры ──"
@@ -313,6 +315,7 @@ cmd_status() {
     || echo "(сервер не отвечает)"
   echo "── автозапуск ──"
   systemctl --user is-enabled "$UNIT_NAME.service" 2>/dev/null || echo "выключен"
+  systemctl --user is-enabled "$UNIT_NAME-watchdog.timer" 2>/dev/null | sed 's/^/watchdog: /' || true
   loginctl show-user "$USER" --property=Linger 2>/dev/null || true
 }
 
@@ -347,18 +350,58 @@ RestartSec=30
 [Install]
 WantedBy=default.target
 EOF
+  # вотчдог крашей: rootless podman не оставляет живого наблюдателя после
+  # `compose up -d` (проверено kill-тестом), поэтому раз в минуту проверяем,
+  # что контейнер жив, если только стек не остановлен ЯВНО (hfctl down /
+  # noautostart пишут marker).
+  cat > "$unit_dir/$UNIT_NAME-watchdog.service" <<EOF
+[Unit]
+Description=hipfire watchdog (hfctl): поднимает стек после нештатного падения
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/env bash $SELF _watchdog
+EOF
+  cat > "$unit_dir/$UNIT_NAME-watchdog.timer" <<EOF
+[Unit]
+Description=hipfire watchdog timer (hfctl, 1 min)
+
+[Timer]
+OnBootSec=2min
+OnUnitActiveSec=1min
+RandomizedDelaySec=10
+
+[Install]
+WantedBy=timers.target
+EOF
   systemctl --user daemon-reload
-  systemctl --user enable "$UNIT_NAME.service"
+  systemctl --user enable "$UNIT_NAME.service" "$UNIT_NAME-watchdog.timer"
+  systemctl --user start "$UNIT_NAME-watchdog.timer"
+  rm -f "$STOP_MARKER"
   sudo loginctl enable-linger "$USER"
-  echo "автозапуск ВКЛ (unit: $UNIT_NAME.service, linger=yes)"
+  echo "автозапуск ВКЛ (unit + watchdog-таймер 1м, linger=yes)"
+}
+
+# внутренняя команда вотчдога (не для ручного запуска)
+cmd_watchdog() {
+  [ -f "$STOP_MARKER" ] && return 0
+  local st
+  st=$(podman inspect -f '{{.State.Status}}' "$CONTAINER" 2>/dev/null || echo missing)
+  if [ "$st" != running ]; then
+    echo "$(date -Is) watchdog: container state=$st -> up" >> "$STACK_DIR/.hfctl-watchdog.log" 2>/dev/null || true
+    compose up -d >/dev/null 2>&1 || true
+  fi
 }
 
 cmd_noautostart() {
   # Юнит oneshot контейнеры не держит (compose up -d отсоединён) — останавливаем
   # стек напрямую, иначе ExecStop не выполнится для уже завершённого юнита.
   compose stop >/dev/null 2>&1 || true
-  systemctl --user disable "$UNIT_NAME.service" 2>/dev/null || true
-  rm -f "$HOME/.config/systemd/user/$UNIT_NAME.service"
+  touch "$STOP_MARKER"
+  systemctl --user disable "$UNIT_NAME.service" "$UNIT_NAME-watchdog.timer" 2>/dev/null || true
+  rm -f "$HOME/.config/systemd/user/$UNIT_NAME.service" \
+        "$HOME/.config/systemd/user/$UNIT_NAME-watchdog.service" \
+        "$HOME/.config/systemd/user/$UNIT_NAME-watchdog.timer"
   systemctl --user daemon-reload
   # linger глушим: в выключенном состоянии сервер не должен вскакивать при boot.
   sudo loginctl disable-linger "$USER"
@@ -404,6 +447,7 @@ case "$cmd" in
   up)           cmd_up ;;
   down)         cmd_down ;;
   status)       cmd_status ;;
+  _watchdog)    cmd_watchdog ;;
   logs)         cmd_logs "$@" ;;
   mode)         cmd_mode "$@" ;;
   autostart)    cmd_autostart ;;

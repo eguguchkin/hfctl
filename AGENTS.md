@@ -304,8 +304,14 @@ bash hfctl uninstall [--purge-models] [--purge-image]
   (mq6-xt + mq4-xts) + dflash-mq4 draft → конфиг-профиль через
   `podman compose run --rm --no-deps` (volume проекта гарантирован) →
   force-recreate → wait_health → smoke. Идемпотентен.
-- Переподнимание при краше: `restart: unless-stopped` в compose.yml (за
-  podman); systemd-unit (autostart) — только на boot, Restart=on-failure.
+- Переподнимание при краше: `restart: unless-stopped` в compose.yml НЕ работает
+  для rootless после `compose up -d` (проверено kill-тестом: контейнер остался
+  Exited; podmon-наблюдатель не переживает отсоединение, а
+  podman-restart.service — только сессионный старт). Поэтому autostart
+  ставит **watchdog**: `hipfire-compose-watchdog.timer` (1 мин) →
+  `hfctl _watchdog` → если контейнер не running и нет маркера
+  `.hfctl-stopped` — `compose up -d`. Ячная остановка только через
+  `hfctl down` (ставит маркер); `podman stop` вручную вотчдог复活ит.
 - noautostart снимает и linger (выключенный сервер не вскакивает при boot);
   файлы/образ/модели целы. uninstall — слоёный: по умолчанию щадит модели и
   образ (--purge-models/--purge-image), снимает контейнеры, volumes
