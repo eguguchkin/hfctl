@@ -291,12 +291,12 @@ sys.exit(0 if d.get("status")=="ok" and d.get("model") and not d.get("loading_mo
 
 smoke() {
   log "смоук: 2 запроса"
-  local ok=1
-  for p in "Ответь ровно: ок" "Напиши одну строку кода на python: hello world"; do
+  local ok=1 prompt
+  for prompt in "Ответь ровно: ок" "Напиши одну строку кода на python: hello world"; do
     local out
     out=$(curl -fsS -m 120 "http://127.0.0.1:$PORT/v1/chat/completions" \
       -H 'Content-Type: application/json' \
-      -d "{\"model\":\"$(cur_model)\",\"messages\":[{\"role\":\"user\",\"content\":\"$p\"}],\"max_tokens\":200,\"reasoning_effort\":\"none\"}" 2>/dev/null) || { ok=0; continue; }
+      -d "{\"model\":\"$(cur_model)\",\"messages\":[{\"role\":\"user\",\"content\":\"$prompt\"}],\"max_tokens\":200,\"reasoning_effort\":\"none\"}" 2>/dev/null) || { ok=0; continue; }
     printf '%s' "$out" | python3 -c 'import json,sys; d=json.load(sys.stdin); c=d["choices"][0]["message"]["content"]; print("ответ:", (c or "")[:60].strip() or "(ПУСТО)"); sys.exit(0 if (c or "").strip() else 1)' || ok=0
   done
   [ "$ok" = 1 ] || die "смоук не прошёл — смотри 'hfctl logs'"
@@ -435,7 +435,8 @@ print(json.dumps({
   hline=$(printf '%s' "$body" | python3 -c 'import json,sys
 d=json.load(sys.stdin); c=d.get("capabilities",{})
 st="ok" if d.get("status")=="ok" and not d.get("loading_model") else ("загрузка: "+str(d.get("loading_model")) if d.get("loading_model") else d.get("status","?"))
-print("health:", st, "| модель:", d.get("model"), "| режим:", c.get("mode"), "| слоты:", c.get("multi_slot_slots"))' 2>/dev/null || echo "health: сервер не отвечает")
+extra = (" | слоты: "+str(c.get("multi_slot_slots"))) if c.get("mode")=="multi-slot" else ""
+print("health:", st, "| модель:", d.get("model"), "| режим:", c.get("mode")+extra)' 2>/dev/null || echo "health: сервер не отвечает")
   echo "профиль: $prof | автозапуск: $([ "$auto" = enabled ] && echo вкл || echo выкл) (watchdog: $([ "$wdog" = enabled ] && echo вкл || echo выкл))"
   echo "$hline"
   echo "── контейнеры ──"
