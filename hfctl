@@ -75,6 +75,11 @@ ram_pool_gib() {  # весь доступный пул (APU: MemTotal; iGPU де
 }
 profile_gate() {  # profile_gate <id> — RAM-гейт; die с цифрами при отказе
   local prof="$1" need have
+  if [ "${HFCTL_FORCE:-}" = 1 ] || [ "${FORCE_GATE:-}" = 1 ]; then
+    need=$(profile_field "$prof" 4); have=$(ram_pool_gib)
+    [ "$have" -ge "$need" ] || warn "--force: RAM-гейт обойдён (нужно ≥${need} GiB, есть ${have}) — движок может отказать в загрузке"
+    return 0
+  fi
   need=$(profile_field "$prof" 4); have=$(ram_pool_gib)
   [ "$have" -ge "$need" ] || {
     echo "ERROR: профиль $prof требует ≥${need} GiB единого пула памяти" >&2
@@ -172,13 +177,21 @@ ask() {  # ask <question> — 0 при да; при не-TTY и без --yes —
 }
 
 # ── файлы стека (встраиваю официальные compose-файлы hipfire 0.4.5) ─────────
+ensure_symlink() {  # ~/.local/bin/hfctl → бинарь в стеке (вариант 2: стек = истина)
+  local bin_dir="$HOME/.local/bin"
+  mkdir -p "$bin_dir"
+  ln -sfn "$STACK_DIR/hfctl" "$bin_dir/hfctl"
+}
 write_stack_files() {
   log "стек в $STACK_DIR"
   mkdir -p "$STACK_DIR" "$MODELS_DIR"
-  # бинарь живёт в стеке: вотчдог и юниты ссылаются на $STACK_DIR/hfctl
-  if [ "$SELF" != "$STACK_DIR/hfctl" ]; then
-    cp "$SELF" "$STACK_DIR/hfctl.new" && chmod +x "$STACK_DIR/hfctl.new" && mv -f "$STACK_DIR/hfctl.new" "$STACK_DIR/hfctl"
+  # бинарь живёт В СТЕКЕ (источник истины; юниты ссылаются на него).
+  # Копируем только при отсутствии (обновление — install.sh / 'hfctl upgrade'):
+  # перезапись здесь могла бы откатить свежий install.sh-бинарь старым.
+  if [ ! -f "$STACK_DIR/hfctl" ] && [ "$SELF" != "$STACK_DIR/hfctl" ]; then
+    install -m 0755 "$SELF" "$STACK_DIR/hfctl"
   fi
+  ensure_symlink
 
   # compose.yml — дословно из репозитория hipfire 0.4.5 (без monitoring-профилей:
   # они ссылаются на каталоги репо, которые hfctl не разворачивает).
@@ -423,7 +436,7 @@ pull_profile_models() {  # все модели + draft профиля
 
 # ── подкоманды ──────────────────────────────────────────────────────────────
 cmd_install() {
-  local prof="" no_autostart=0 set_port=0 set_bind=0 set_models=0
+  local prof="" no_autostart=0 set_port=0 set_bind=0 set_models=0 force=0
   while [ $# -gt 0 ]; do
     case "$1" in
       --profile)     prof="$2"; shift 2 ;;
@@ -431,6 +444,7 @@ cmd_install() {
       --bind)        BIND="$2"; set_bind=1; shift 2 ;;
       --models-dir)  MODELS_DIR="$2"; set_models=1; shift 2 ;;
       --no-autostart) no_autostart=1; shift ;;
+      --force)       force=1; shift ;;
       --yes)         ASSUME_YES=1; shift ;;
       *) die "неизвестный флаг install: $1 (доступны: --profile ${PROFILE_LIST// /|} --port --bind --models-dir --no-autostart --yes)" ;;
     esac
@@ -448,6 +462,7 @@ cmd_install() {
     v=$(env_val HIPFIRE_MODELS_PATH); [ -n "$v" ] && [ "$set_models" = 0 ] && MODELS_BASE="$v" && set_models_dir "$prof"
   fi
   prof=$(resolve_profile "${prof:-$PROFILE_DEFAULT}") || die "неизвестный профиль '$prof' (доступны: $PROFILE_LIST)"
+  FORCE_GATE="${FORCE_GATE:-}"; [ "${force:-0}" = 1 ] && FORCE_GATE=1
   profile_gate "$prof"          # RAM-гейт: отказ ДО любого скачивания (spec §6)
   # миграция плоского models/ в сеты (один раз; сохраняет скачанное)
   migrate_models
@@ -488,10 +503,20 @@ EOF
 }
 
 cmd_use() {
-  local p="${1:-}"
+  local p="${1:-}" force=0
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --force) force=1; shift ;;
+      -*) die "неизвестный флаг use: $1 (доступен --force — обойти RAM-гейт)" ;;
+      *) p="$1"; shift ;;
+    esac
+  done
   [ -n "$p" ] || die "использование: hfctl use <profile> (${PROFILE_LIST// /|})"
   [ -f "$STACK_DIR/.env" ] || die "стек не установлен — сначала 'hfctl install'"
   p=$(resolve_profile "$p") || die "неизвестный профиль '$p' (доступны: $PROFILE_LIST)"
+  local prev_prof prev_model
+  prev_prof=$(cur_profile); prev_model=$(cur_model)
+  [ "${force:-0}" = 1 ] && FORCE_GATE=1
   profile_gate "$p"             # RAM-гейт: отказ ДО любого скачивания (spec §6)
   migrate_models                # плоский models/ (старые версии) → сеты
   set_models_dir "$p"
@@ -516,7 +541,12 @@ cmd_use() {
   compose up -d 2>&1 | tail -2      # контейнеры могут быть остановлены (off)
   apply_profile "$p"
   compose up -d --force-recreate 2>&1 | tail -2
-  wait_health 600
+  if ! wait_health 600; then
+    # движок отказал в загрузке (admission/refusal): откатываем канон на прежний
+    warn "профиль $p НЕ поднялся — откат канона на $prev_prof ($prev_model)"
+    write_env "$prev_prof" "$prev_model"
+    return 1
+  fi
   smoke
   check_route "$p"
   log "профиль $p активен (конфиг автозапуска обновлён — переживёт рестарт)"
@@ -764,6 +794,22 @@ cmd_models() {  # что скачано и что требует каждый п
   echo "чужого сета получит 404 (молчаливый swap невозможен)"
 }
 
+cmd_pull() {  # hfctl pull <profile> — скачать сет модели БЕЗ переключения
+  local p="${1:-}"
+  [ -n "$p" ] || die "использование: hfctl pull <profile> (${PROFILE_LIST// /|})"
+  p=$(resolve_profile "$p") || die "неизвестный профиль '$p' (доступны: $PROFILE_LIST)"
+  # скачивание ≠ запуск: RAM-гейт НЕ применяем (бэкап-сет на слабой машине легален)
+  [ -f "$STACK_DIR/.env" ] || die "стек не установлен — сначала 'hfctl install'"
+  [ -d "$MODELS_BASE" ] || mkdir -p "$MODELS_BASE"
+  migrate_models
+  local target="$MODELS_BASE/$(model_set "$p")"
+  mkdir -p "$target"
+  log "тяну сет '$(model_set "$p")' профиля $p в $target (без переключения профиля)"
+  MODELS_DIR="$target" pull_profile_models "$p"
+  echo "готово: $target"
+  echo "(активация — 'hfctl use $p'; RAM-гейт оценивается при use)"
+}
+
 cmd_uninstall() {
   local purge_models=0 purge_image=0
   while [ $# -gt 0 ]; do
@@ -812,6 +858,7 @@ case "$cmd" in
   logs)         cmd_logs "$@" ;;
   doctor)       cmd_doctor ;;
   models)       cmd_models ;;
+  pull)         cmd_pull "$@" ;;
   up)           cmd_up ;;          # скрытый алиас
   down)         cmd_down ;;        # скрытый алиас
   mode)         cmd_mode "$@" ;;   # скрытый алиас
@@ -821,6 +868,6 @@ case "$cmd" in
   _boot)        cmd_boot ;;
   uninstall)    cmd_uninstall "$@" ;;
   "")           usage ;;
-  *)            echo "неизвестная команда '$cmd'. Команды: install | use <profile> | status [--json] | logs | on | off | doctor | models | uninstall" \
+  *)            echo "неизвестная команда '$cmd'. Команды: install | use <profile> | status [--json] | logs | on | off | doctor | models | pull <profile> | uninstall" \
                   " (алиасы: up|down|mode|autostart|noautostart). Профили: $PROFILE_LIST" >&2; exit 1 ;;
 esac
