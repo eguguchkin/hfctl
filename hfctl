@@ -359,27 +359,27 @@ smoke() {
 }
 
 check_route() {  # check_route <profile> — фактический роут (spec §7): движок
-  # может вежливо деградировать (vmm lanes refused → serial) — показываем реальность
-  local prof="$1" line
-  line=$(printf '%s' "$(curl -fsS -m 5 "http://127.0.0.1:$PORT/health" 2>/dev/null)" | python3 -c 'import json,sys
-d=json.load(sys.stdin); c=d.get("capabilities",{})
-print("|".join(str(c.get(k)) for k in ("mode","continuous_batch_route","continuous_batch_capable")))' 2>/dev/null || echo "|||")
-  local mode croute ccap
-  mode=${line%%|*}; line=${line#*|}; croute=${line%%|*}; ccap=${line##*|}
+  # может вежливо деградировать (vmm lanes refused → serial) — показываем реальность.
+  # Источники: логи (fn-lanes staged / lanes refused — авторитетно) + health.
+  local prof="$1" clog staged refused
+  clog=$(podman logs --tail 400 "$CONTAINER" 2>&1 || true)
+  staged=$(printf '%s' "$clog" | grep -oE "fn-lanes staged: topology=[a-z]+ lanes=[0-9]+[^\"]*spec=[a-z0-9]+" | tail -1)
+  refused=$(printf '%s' "$clog" | grep -oE "qwen4 lanes refused:[^-—]*" | tail -1)
   case "$prof" in
     flash-multi)
-      if [ "$croute" = "vmm" ]; then
-        echo "lanes: vmm (настоящий батчинг, cbs=4) — принят"
-      elif [ "$ccap" = "False" ] || [ "$croute" = "None" ]; then
-        warn "vmm lanes НЕ приняты на этом GPU ($croute/$ccap) — сервер работает serial (fallback)"
-        warn "если лог содержит 'qwen4 lanes refused:' — смотри 'hfctl logs'"
+      if [ -n "$staged" ]; then
+        echo "lanes: $staged"
+        echo "      → настоящий батчинг принят (запросы делят trunk-шаг)"
+      elif [ -n "$refused" ]; then
+        warn "vmm lanes ОТКАЗАНЫ: $refused — сервер работает serial (fallback)"
+        warn "тексты eligible-запросов всё равно исполняются корректно (singleton)"
       else
-        echo "батч-роут: ${croute:-нет данных} (capabilities: mode=$mode)"
+        echo "lanes: данных нет (ни staged, ни refused в логах) — проверь 'hfctl logs'"
       fi
       ;;
-    27b-slots)  echo "роут: multi_slot ($mode)" ;;
-    *)          [ "$croute" = "vmm" ] && echo "роут: singleton, DFlash (vmm-батчинг готов как резерв)" \
-                                        || echo "роут: singleton serial ($mode)" ;;
+    27b-slots)  echo "роут: multi_slot ($(curl -fsS -m 5 "http://127.0.0.1:$PORT/health" 2>/dev/null | python3 -c 'import json,sys;print(json.load(sys.stdin).get("capabilities",{}).get("mode","?"))' 2>/dev/null || echo '?'))" ;;
+    *)          echo "роут: singleton+DFlash ($(
+                  printf '%s' "$clog" | grep -oE "spec: [a-z0-9 ]+" | tail -1 | head -c 60))" ;;
   esac
 }
 
