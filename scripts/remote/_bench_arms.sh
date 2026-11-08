@@ -10,7 +10,7 @@ F="podman compose -f compose.yml -f compose.halo.yml -f compose.local.yml"
 OUT="$HOME/bench-runs"
 mkdir -p "$OUT"
 PROMPT=${HF_PROMPT_FILE:-/prompts/merge_sort_thinking_off.txt}
-MODEL=${HF_MODEL:-qwen3.8:27b-mq4-xts}
+MODEL=${HF_MODEL:-qwen3.8:27b-mq6-xt}
 IMAGE=ghcr.io/warpfront/hipfire:0.4.5
 
 echo "=== md5 binaries + prompt ==="
@@ -26,13 +26,17 @@ for arm in off dflash; do
       --prompt-file "$PROMPT" --json \
       > "$OUT/${arm}_${i}.json" 2> "$OUT/${arm}_${i}.err"
     echo "== arm=$arm run=$i exit=$? =="
-    python3 - "/$OUT" "${arm}_${i}" <<'PY'
-import json, sys, os
-d = json.load(open(f"{sys.argv[1]}/{sys.argv[2]}.json"))
-s = d.get("samples", [])
-dec = [round(x.get("decode_tok_s") or x.get("decode_tps") or 0, 1) for x in s]
-tau = [x.get("tau") for x in s]
-print("prompt_md5:", d.get("prompt_md5"), "| decode tok/s:", dec, "| tau:", tau)
+    python3 - "$OUT" "${arm}_${i}" <<'PY'
+import json, re, sys
+# hipfire печатает лог-баннер в stdout до JSON — вырезаем префикс
+raw = open(f"{sys.argv[1]}/{sys.argv[2]}.json").read()
+m = re.search(r"^\{", raw, re.M)
+d, _ = json.JSONDecoder().raw_decode(raw[m.start():])
+s = d.get("samples", {})
+print("prompt_md5:", d.get("prompt_md5"),
+      "| decode tok/s:", s.get("decode"),
+      "| prefill tok/s:", s.get("prefill"),
+      "| ttft_ms:", s.get("ttft_ms"))
 PY
   done
 done

@@ -8,7 +8,7 @@
 #             latency короткого = его wall (главная метрика HOL-изоляции)
 set -u
 URL=http://127.0.0.1:11435/v1/chat/completions
-MODEL=${HF_MODEL:-qwen3.8:27b-mq4-xts}
+MODEL=${HF_MODEL:-qwen3.8:27b-mq6-xt}
 OUT="$HOME/conc-runs"
 mkdir -p "$OUT"; rm -f "$OUT"/*.json
 stamp(){ python3 -c 'import time;print(f"{time.time():.3f}")'; }

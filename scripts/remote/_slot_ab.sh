@@ -5,7 +5,7 @@
 # последовательно; сравниваем стену. Артефакты: ~/ab/{p,s}{1,2}.json.
 set -u
 URL=http://127.0.0.1:11435/v1/chat/completions
-MODEL=${HF_MODEL:-qwen3.8:27b-mq4-xts}
+MODEL=${HF_MODEL:-qwen3.8:27b-mq6-xt}
 OUT="$HOME/ab"
 mkdir -p "$OUT"
 A="Напиши на Python функцию quicksort со вставкой-тестом. Подробные комментарии, 200+ слов."

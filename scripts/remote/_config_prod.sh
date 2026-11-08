@@ -5,7 +5,7 @@ set -u
 STACK="$HF_STACK"            # имя каталога стека в $HOME
 DIR="$HOME/$STACK"
 IMAGE=ghcr.io/warpfront/hipfire:0.4.5
-MODEL_TAG=qwen3.8:27b-mq4-xts
+MODEL_TAG=qwen3.8:27b-mq6-xt
 MODELS_PATH="$HOME/models/hipfire"   # переопредели HF_MODELS_PATH при желании
 [ -n "${HF_MODELS_PATH:-}" ] && MODELS_PATH="$HF_MODELS_PATH"
 
@@ -28,12 +28,16 @@ EOF
 echo "   записан .env (COMPOSE_FILE в .env инертен: podman-compose его НЕ читает," 
 echo "   перечень compose-файлов нужно всегда передавать через -f явно)"
 
-echo "== 2. compose.local.yml (промпт-фикстуры → /prompts:ro)"
-cat > compose.local.yml <<'EOF'
+echo "== 2. compose.local.yml (промпт-фикстуры → /prompts:ro + DFlash draft)"
+cat > compose.local.yml <<EOF
 services:
   hipfire:
     volumes:
       - ./benchmarks/prompts:/prompts:ro
+    environment:
+      # MQ6-xt не объявляет dflash-sidecar в реестре; MQ4 draft — рекомендованный
+      # контроллер для qwen3.8:27b. Пустое значение = DFlash выключен.
+      HIPFIRE_DFLASH_DRAFT: ${HF_DFLASH_DRAFT:-/home/hipfire/.hipfire/models/qwen38-27b-dflash-mq4.hfq}
 EOF
 
 echo "== 3. one-shot конфиг в volume (движок может быть выключен)"
@@ -52,6 +56,11 @@ cfgset serve.batch_nonexact true
 cfgset serve.multi_slot false
 cfgset serve.multi_slot_slots 4                       # запас для экспериментов (прод: false)
 cfgset serve.multi_slot_ctx 262144                    # инертен при multi_slot=false
+# DFlash для mq6-xt: тег не объявляет sidecar, схема default off → включаем
+# явно; путь черновика приходит env из compose.local.yml (HIPFIRE_DFLASH_DRAFT).
+# `on` = fail-closed: отсутствие/несовместимость draft валят загрузку заметно.
+# Отключение: HF_DFLASH=off (тогда и HIPFIRE_DFLASH_DRAFT не нужен).
+cfgset speculation.dflash "${HF_DFLASH:-on}"
 
 echo "== 4. effective config.toml"
 podman run --rm -v "$VOL:/home/hipfire/.hipfire" "$IMAGE" \

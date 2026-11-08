@@ -7,7 +7,7 @@ set -u
 N=${1:-4}
 URL=http://127.0.0.1:11435/v1/chat/completions
 OUT="$HOME/par-runs"
-MODEL=${HF_MODEL:-qwen3.8:27b-mq4-xts}
+MODEL=${HF_MODEL:-qwen3.8:27b-mq6-xt}
 mkdir -p "$OUT"; rm -f "$OUT"/resp_*.json
 stamp(){ python3 -c 'import time;print(f"{time.time():.3f}")'; }
 

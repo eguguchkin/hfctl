@@ -5,7 +5,7 @@ set -u
 URL=http://127.0.0.1:11435/v1/chat/completions
 OUT="$HOME/hfbox-smoke"
 mkdir -p "$OUT"
-MODEL=${HF_MODEL:-qwen3.8:27b-mq4-xts}
+MODEL=${HF_MODEL:-qwen3.8:27b-mq6-xt}
 
 ask() { # $1=файл $2=модель-параметр json сообщения
   curl -s -o "$OUT/$1" -w '%{http_code}' -X POST "$URL" \

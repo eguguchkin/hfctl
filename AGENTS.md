@@ -8,15 +8,24 @@
 
 | Параметр | Значение |
 |---|---|
-| Модель | `qwen3.8:27b-mq4-xts` (+ draft sidecar `qwen38-27b-dflash-mq4.hfq` из реестра) |
+| Модель | `qwen3.8:27b-mq6-xt` (+ draft sidecar `qwen38-27b-dflash-mq4.hfq`, явный env — см. DFlash-wiring) |
 | Образ | `ghcr.io/warpfront/hipfire:0.4.5` (публичный на ghcr; теги 0.4.3…0.4.5 + latest) |
 | `memory.max_seq` | 262144 |
-| Спекуляция | DFlash `auto` из реестра (paired-draft вручную включать не надо) |
+| Спекуляция | `speculation.dflash=on` + `HIPFIRE_DFLASH_DRAFT` env (mq6-xt не объявляет sidecar в реестре; MQ4 draft — рекомендованный контроллер) |
 | `serve.vmm_batch` | true (деградирует в serial FIFO на gfx1151 — см. «Факты о движке») |
 | `serve.continuous_batch_size` | 4 |
 | `serve.batch_nonexact` | true |
 | Bind | `0.0.0.0:11435`, **без** API-ключа (LAN) |
 | `memory.session_cache_disk_bytes` | 32 GiB (на qwen3.5 инертен — см. факты) |
+
+### DFlash-wiring для mq6-xt (важно при смене тега)
+
+Реестр объявляет `speculation.dflash=auto` только для тегов с dflash-sidecar
+(`qwen3.8:27b-mq4-xts` и т.п.). У `mq6-xt` sidecar не объявлен, а схемный
+default `off` → включаем явно: `config set speculation.dflash on` (сделано в
+`config_prod.sh`) + путь черновика env'ом `HIPFIRE_DFLASH_DRAFT`
+(пишется в `compose.local.yml`, канон против legacy `developer.dflash_draft`).
+Проверка: load summary `spec: dflash (draft …, block 8)`.
 
 Ограничения пользователя (неизменные): не выходить за рамки обычного юзера
 (sudo только точечно), запуск через официальный контейнер ghcr, без «плана А»
@@ -57,7 +66,7 @@ multi-slot — см. факты).
   init-сервис тянет модель `command: pull --yes`, verify SHA-256 уже внутри),
   `compose.halo.yml` (NPU `/dev/accel` + memlock ulimits 1318060032),
   `compose.local.yml` (маунт `benchmarks/prompts` → `/prompts:ro`).
-- `.env` прод: `HIPFIRE_MODEL=qwen3.8:27b-mq4-xts`, `HIPFIRE_PORT=11435`,
+- `.env` прод: `HIPFIRE_MODEL=qwen3.8:27b-mq6-xt`, `HIPFIRE_PORT=11435`,
   `HIPFIRE_BIND=0.0.0.0`, `HIPFIRE_MODELS_PATH=/home/<user>/models/hipfire`,
   `HIPFIRE_IMAGE=ghcr.io/warpfront/hipfire:0.4.5`,
   `HIPFIRE_IMAGE_TARGET=full`.
@@ -65,9 +74,10 @@ multi-slot — см. факты).
   (hipfire-init тянет модель + sidecars и верифицирует SHA-256;
   pull идемпотентен, уже верифицированные файлы пропускает).
   На che-evo модели уже лежат в `/home/hipfire/models/hipfire`
-  (container view: `/home/hipfire/.hipfire/models`) — все 4 SHA-256 сверены:
-  - `qwen3.8-27b.mq4-xts` `3e38ccba…f8ae` (14987185152 B)
-  - `qwen38-27b-dflash-mq4.hfq` `d0a74a23…401bc` (draft sidecar)
+  (container view: `/home/hipfire/.hipfire/models`) — sha256 сверены:
+  - `qwen3.8-27b.mq6-xt` `9d472ddc…c8b2f` (21385849856 B) — **прод с 2026-11-08**
+  - `qwen3.8-27b.mq4-xts` `3e38ccba…f8ae` (14987185152 B) — оставлен как откат
+  - `qwen38-27b-dflash-mq4.hfq` `d0a74a23…401bc` (draft sidecar, общий)
   - `qwen3.8-27b.mtp` `f0d46d07…32e`, `qwen3.8-27b-vision.hfq` `269457cb…875c9`
 - Контейнер во время деплоя может печатать предупреждение
   «models is not writable by uid 1000 …; running as the container root» —
@@ -141,6 +151,7 @@ multi-slot — см. факты).
 
 Хост: che-evo; бинари 0.4.5: hipfire md5 `1c3a2859…`, daemon `f3cd6434…`;
 prompt merge_sort md5 `253c7ac5`; свежие процессы ×3.
+**Внимание: цифры ниже сняты на `mq4-xts`** (baseline до перехода на mq6-xt).
 
 - **DFlash: decode 130.5 tok/s, τ=13.18 (stdev 0.05)** — реален для
   boilerplate-кода (текст глазами чистый; живая проверка 76.2 tok/s τ6.8).
@@ -284,6 +295,10 @@ ssh на целевой хост. Общие переменные окружен
 - `scripts/slot_ab.sh` — A/B «параллель vs сериал» для экспериментов с
   multi_slot (в текущей прод-конфигурации — не запускать, только для
   экспериментов).
+- `scripts/slots_mode.sh on [slots=2] [ctx=262144] | off` — переключить
+  сервер на слот-движок (HOL-изоляция ценой ~25% агрегата) и обратно на
+  прод; делает config → force-recreate → wait_health → печать активного
+  режима из /health.
 
 ## Порядок работы над задачами hfbox
 
