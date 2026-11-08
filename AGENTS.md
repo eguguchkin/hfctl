@@ -319,19 +319,24 @@ image ghcr, podman volumes/network, `/etc/security/limits.d/99-hipfire-memlock.c
 
 ```
 hfctl install [--profile P] [--port N] [--bind A] [--models-dir D] [--no-autostart]
-hfctl use 27b-single|27b-slots       # сменить профиль (+конфиг автозапуска)
+hfctl use 27b-single|27b-slots|flash-multi   # сменить профиль (+конфиг автозапуска)
 hfctl status [--json] | logs [-f] [-n N]
 hfctl on | off                       # автозапуск вкл / стоп+снятие
+hfctl doctor | models                # диагностика без изменений / модели+профили
 hfctl uninstall [--purge-models] [--purge-image]
 ```
 Скрытые алиасы совместимости: `up|down|mode single|slots [N]|autostart|noautostart`.
-Профили (этап 1): `27b-single` (default; singleton+DFlash, модели mq4-xts
-default + mq6-xt hot-swap) и `27b-slots` (multi_slot 2×262144). Канон
-профиля — `HFCTL_PROFILE` в `.env`; boot/вотчдог поднимают его. С 2026-11-08
-прод che-evo на этом (27b-single; модель по умолчанию мигрирована с mq6-xt).
-flash-multi + RAM-гейт — этап 2 (spec/plan.md), в коде ещё отсутствует.
-install включает автозапуск по умолчанию (`--no-autostart` — нет); старые
-`autostart/noautostart` = новые `on/off`.
+Профили: `27b-single` (default; singleton+DFlash, модели mq4-xts default +
+mq6-xt hot-swap), `27b-slots` (multi_slot 2×262144), `flash-multi`
+(flash-next-mq4-xts, VMM fn-lanes, RAM-гейт ≥80 GiB). RAM-гейт отказывает
+ДО скачивания с цифрами; `check_route` после use/install печатает
+фактический роут (vmm lanes / fallback serial). Канон профиля —
+`HFCTL_PROFILE` в `.env`; boot/вотчдог поднимают его. С 2026-11-08 прод
+che-evo на 27b-single (модель по умолчанию мигрирована с mq6-xt).
+flash-multi на che-evo принят ТОЛЬКО синтаксически (config set/get все 8
+ключей); E2E lanes — этап 4 на che-FAEX1. install включает автозапуск
+по умолчанию (`--no-autostart` — нет); старые `autostart/noautostart`
+= новые `on/off`.
 
 - install: префлайт (Ubuntu/Debian, /dev/kfd, apt podman+podman-compose,
   группа render (+перелогин exit 42), limits.d memlock (+ребут exit 42),
