@@ -340,6 +340,7 @@ After=podman-user-wait-network-online.service
 [Service]
 Type=oneshot
 RemainAfterExit=yes
+KillMode=process          # не убивать cgroup контейнеров при остановке юнита
 WorkingDirectory=$STACK_DIR
 ExecStart=$bin compose ${CF[*]} up -d
 ExecStop=$bin compose ${CF[*]} stop
@@ -360,6 +361,9 @@ Description=hipfire watchdog (hfctl): поднимает стек после н�
 
 [Service]
 Type=oneshot
+# ВАЖНО: без KillMode=process systemd при завершении oneshot-юнита убивает
+# весь cgroup — вместе с только что поднятым контейнером (SIGTERM/143).
+KillMode=process
 ExecStart=/usr/bin/env bash $SELF _watchdog
 EOF
   cat > "$unit_dir/$UNIT_NAME-watchdog.timer" <<EOF
