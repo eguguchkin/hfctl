@@ -222,10 +222,13 @@ wait_health() {  # wait_health [timeout_sec]
   log "жду готовности (до ${t}с)"
   while [ "$i" -lt "$t" ]; do
     local body
-    if body=$(curl -fsS -m 5 "http://127.0.0.1:$PORT/health" 2>/dev/null); then
-      if ! printf '%s' "$body" | grep -Eq '"loading_model"[[:space:]]*:[[:space:]]*"'; then
-        printf '%s\n' "$body" | head -c 300; echo; echo; echo "HEALTHY после ${i}с"; return 0
-      fi
+    if body=$(curl -fsS -m 5 "http://127.0.0.1:$PORT/health" 2>/dev/null) && \
+       printf '%s' "$body" | python3 -c 'import json,sys
+d=json.load(sys.stdin)
+sys.exit(0 if d.get("status")=="ok" and d.get("model") and not d.get("loading_model") else 1)' 2>/dev/null; then
+      printf '%s\n' "$body" | head -c 300; echo
+      echo "HEALTHY после ${i}с"
+      return 0
     fi
     sleep 5; i=$((i+5))
   done
@@ -261,7 +264,14 @@ cmd_install() {
   while [ $# -gt 0 ]; do
     case "$1" in
       --mode) MODE="$2"; shift 2 ;;
-      --model) MODEL_DEFAULT="qwen3.8:27b-$2"; shift 2 ;;
+      --model)
+        # алиасы: mq6 -> mq6-xt, mq4 -> mq4-xts (можно и полный суффикс)
+        case "$2" in
+          mq6) MODEL_DEFAULT=qwen3.8:27b-mq6-xt ;;
+          mq4) MODEL_DEFAULT=qwen3.8:27b-mq4-xts ;;
+          qwen3.8:27b-*) MODEL_DEFAULT="$2" ;;
+          *) die "--model: mq6|mq4|qwen3.8:27b-* (получено: $2)" ;;
+        esac; shift 2 ;;
       --slots) SLOTS="$2"; shift 2 ;;
       *) die "неизвестный флаг install: $1" ;;
     esac
