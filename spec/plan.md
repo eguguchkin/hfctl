@@ -165,16 +165,24 @@ VMM QSA-стэйт Flash-Next заявлен «gfx1151/gfx1201 automatic»).
    обратного переключения на новой машине.
 
 ### DoD
-- [ ] Пункт 0 выполнен: перед первым действием на che-FAEX1 получено
+- [x] Пункт 0 выполнен: перед первым действием на che-FAEX1 получено
       подтверждение пользователя, `MemAvailable` ≥ ~100 GiB зафиксировано
-      (gufo остановлен пользователем, не нами).
-- [ ] `hfctl install --profile flash-multi` на 192.168.1.249: гейт пропущен,
-      скачано (размер + sha OK), сервер healthy, smoke 200.
-- [ ] Фактический роут распознан hfctl и напечатан (vmm-lanes ИЛИ
-      refused+serial) — совпадает с логами движка.
-- [ ] Порог RAM откалиброван цифрами живого admission; hfctl+spec обновлены.
-- [ ] Бенч-таблица (solo / 2 параллельных / 4) записана; вывод: даёт ли
-      flash-multi ожидаемый выигрыш параллельности.
+      (gufo остановлен пользователем, не нами). — 118 GiB
+- [x] `hfctl install --profile flash-multi` на 192.168.1.249: гейт пропущен,
+      скачано (split base + overlay + PLE ~78 GB, sha OK), сервер healthy,
+      smoke 200. — с preflight-фиксом (podman-compose при установленном
+      podman) и согласованным ребутом (memlock)
+- [x] Фактический роут распознан hfctl и напечатан (vmm-lanes ИЛИ
+      refused+serial) — совпадает с логами движка. — **fn-lanes staged:
+      lanes=4 spec=mtp K=7 ПРИНЯТЫ на gfx1151**; check_route переписан
+      на логи (health не отдаёт continuous_batch_*)
+- [x] Порог RAM откалиброван цифрами живого admission; hfctl+spec обновлены.
+      — 80 GiB подтверждён (факт: ~105 GB рабочий максимум, запас 25+ GB)
+- [x] Бенч-таблица (solo / 2 параллельных / 4) записана; вывод: даёт ли
+      flash-multi ожидаемый выигрыш параллельности. — **aggregate РАСТЁТ:
+      50 → 60.3 (N=2) → 64.5 tok/s (N=4)**; батчинг реальный (FIFO не менял
+      бы aggregate; multi_slot на 27B падал). Артефакт:
+      `.local-analysis/flash_gfx1151_128gb.txt`
 - [ ] Ребут: flash-multi поднялся сам, smoke OK.
 - [ ] Профиль машины (GPU, пул, результат lanes) записан в AGENTS.md
       («Хост-профиль che-max»), §12 spec закрыт.
