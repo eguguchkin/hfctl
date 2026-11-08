@@ -329,9 +329,9 @@ hfctl uninstall [--purge-models] [--purge-image]
 default + mq6-xt hot-swap) и `27b-slots` (multi_slot 2×262144). Канон
 профиля — `HFCTL_PROFILE` в `.env`; boot/вотчдог поднимают его. С 2026-11-08
 прод che-evo на этом (27b-single; модель по умолчанию мигрирована с mq6-xt).
-flash-multi + RAM-гейт — этап 2 (spec/plan.md). install включает автозапуск
-по умолчанию (`--no-autostart` — нет); старые `autostart/noautostart`
-= новые `on/off`.
+flash-multi + RAM-гейт — этап 2 (spec/plan.md), в коде ещё отсутствует.
+install включает автозапуск по умолчанию (`--no-autostart` — нет); старые
+`autostart/noautostart` = новые `on/off`.
 
 - install: префлайт (Ubuntu/Debian, /dev/kfd, apt podman+podman-compose,
   группа render (+перелогин exit 42), limits.d memlock (+ребут exit 42),
