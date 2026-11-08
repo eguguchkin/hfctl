@@ -310,8 +310,8 @@ bash hfctl uninstall [--purge-models] [--purge-image]
   podman-restart.service — только сессионный старт). Поэтому autostart
   ставит **watchdog**: `hipfire-compose-watchdog.timer` (1 мин) →
   `hfctl _watchdog` → если контейнер не running и нет маркера
-  `.hfctl-stopped` — `compose up -d`. Ячная остановка только через
-  `hfctl down` (ставит маркер); `podman stop` вручную вотчдог复活ит.
+  `.hfctl-stopped` — `compose up -d`. Явная остановка только через
+  `hfctl down` (ставит маркер); `podman stop` вручную вотчдог воскресит.
 - noautostart снимает и linger (выключенный сервер не вскакивает при boot);
   файлы/образ/модели целы. uninstall — слоёный: по умолчанию щадит модели и
   образ (--purge-models/--purge-image), снимает контейнеры, volumes
