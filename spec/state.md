@@ -126,3 +126,16 @@ flash на 60 GiB» (ожидаются сценарии: отказ admission �
   профилей); модели per-сет не трогаем; миграция из legacy-вольюма в
   install/use; purge в uninstall; doctor проверяет каталоги.
   Приёмка на FAEX (flash активен).
+- 2026-11-09: **этап 7 принят** (spec/task-7.md, DoD закрыт): named
+  volumes config/kernels → per-профиль bind ~/hipfire/profiles/<профиль>/{config,kernel};
+  disk-тир кэша и конфиг per-профиль по конструкции; миграция legacy-
+  вольюмов автой в install/use; doctor-строка + legacy-WARN; purge в
+  uninstall. Приёмка: FAEX (миграция 140K+36K, mounts bind, lanes=4,
+  per-профиль config, бэкап-цикл с lesson recreate) + EVO (uninstall→
+  install «как никогда не было» с сохранением базы моделей, per-
+  профильность конфигов при use туда/обратно, watch-регресс). Попутные
+  фиксы: uninstall переносил только активный сет моделей (баг, evo
+  потерял сет flash ~100 GB) → теперь БАЗА целиком (a9b0c7b); --yes
+  в uninstall; smoke -m 300 (первый cold-запрос варит ядра >120 c).
+  Машины: FAEX flash-multi healthy (binary cfba2fbf, legacy-вольюмы
+  до uninstall); EVO 27b-single healthy, вольюмов ноль.

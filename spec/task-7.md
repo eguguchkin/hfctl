@@ -137,17 +137,31 @@
   предсказанного плана, не пересборка); время старта это не портит,
   per-профильное дублирование 36K × N профилей — безвредно.
 
-## DoD-чеклист фактический
-- FAEX: миграция 140K+36K ✅; mounts bind (config+kernel+models) ✅;
+## DoD-чеклист фактический (все пункты ЗАКРЫТЫ, 2026-11-09)
+- FAEX (фаза 1): миграция 140K+36K ✅; mounts bind (config+kernel+models) ✅;
   НОВЫХ томов не создаётся ✅; lanes=4 staged ✅; per-профиль config.toml
   (batch_nonexact=false и др.) ✅; doctor: state-строка + legacy-WARN ✅;
-  smoke 200 ✅ (после recreate); session-cache внутри config/ ✅.
-- EVO: uninstall --yes → «как никогда не было» (profiles/ и legacy-вольюмы
-  отсутствуют); чистый install → bind-маунты, doctor БЕЗ legacy-WARN,
-  27b-single healthy, smoke ×2, dflash — подтверждается фазой 2 (текущий
-  прогон, результат добавлю в STATE).
-- Итерацию «uninstall --purge-models --purge-image» (полный purge моделей)
-  на evo НЕ гоняли — уничтожило бы 130 GB моделей (повторное скачивание
-  часов). Purge-пути по коду: `rm -rf $STACK_DIR` (включает profiles/)
-  + `podman volume rm` legacy-имён (идемпотентен). Остаток: проверить при
+  smoke 200 ✅; session-cache внутри config/ ✅; финальный install (после
+  коммитов фиксов): healthy 30 c, SMOKE OK, lanes=4 ✅.
+- EVO (фаза 4): uninstall --yes rc=0 → «как никогда не было»: profiles/
+  НЕТ, hipfire-вольюмов 0, юнитов 0, limits.d удалён, linger off,
+  keep-мусора нет — при СОХРАНЁННОЙ базе моделей целиком (37G, сет 27b;
+  фикс a9b0c7b) ✅; чистый install: ноль докачки моделей, limits.d+
+  linger восстановлены, HEALTHY ~10 c, SMOKE 2/2, роут spec: dflash,
+  doctor БЕЗ legacy-WARN, bind-маунты ✅.
+- EVO (фаза 5) — пер-профильность при переключении: use 27b-slots →
+  27b-slots/config.toml получил СВОИ значения (multi_slot=true, slots=2,
+  batch_nonexact=false), 27b-single/config.toml НЕ тронут; роут реально
+  сменился (multi-slot); use 27b-single обратно → оба конфига сохранены,
+  роут spec: dflash, smoke 200 ✅. Это центральная ценность этапа
+  (безопасность кэша/конфига при переключении профилей).
+- Регресс: status/logs/smoke — многократно во всех фазах ✅; watch (тик,
+  evo) — строка формата этапа 6 без изменений ✅; watch-код этапом 7 не
+  менялся.
+- Остаток: итерацию uninstall **--purge-models --purge-image** (с
+  удалением всей базы моделей) не гоняли — на evo это уничтожило бы 37G
+  и потребовало бы перекачки; purge-пути по коду: rm -rf $STACK_DIR
+  (включает profiles/) + podman volume rm legacy-имён. Проверить при
   будущей полной зачистке.
+- Машины финально: FAEX flash-multi healthy (binar cfba2fbf, legacy-вольюмы
+  остаются до uninstall); EVO 27b-single healthy (вольюмов ноль).
