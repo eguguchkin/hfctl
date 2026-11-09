@@ -320,6 +320,7 @@ apply_profile() {  # apply_profile <id> — ключи движка из таб�
   log "профиль движка: $prof ($(profile_field "$prof" 5))"
   cfgset memory.max_seq "$MAX_SEQ"
   cfgset memory.session_cache_disk_bytes 34359738368
+  cfgset serve.idle_timeout_seconds 0   # модель резидентна: грузится при старте (pre-warm), не выгружается при простое
   case "$prof" in
     27b-slots)
       cfgset speculation.dflash on
