@@ -1073,10 +1073,10 @@ print("" if ct is None else ct)' "$BENCH_TMP/par_resp_$i" 2>/dev/null || true)
   case "$ROUTE" in
     lanes)
       if [ -n "${MED_SOLO_CODE:-}" ]; then
-        awk -v a="$(bench_med "parallel-$n" 3)" -v s="$MED_SOLO_CODE" -v n="$n" \
+        awk -v a="$(bench_med "parallel-$n" 4)" -v s="$MED_SOLO_CODE" -v n="$n" \
           'BEGIN{ if (s+0>0) printf "parallel-%s: масштабирование: aggregate/solo = %.0f%%\n", n, a/s*100 }'
       else
-        echo "parallel-$n: aggregate $(bench_med "parallel-$n" 3) tok/s (соло-рейт неизвестен — процент не посчитать)"
+        echo "parallel-$n: aggregate $(bench_med "parallel-$n" 4) tok/s (соло-рейт неизвестен — процент не посчитать)"
       fi ;;
     multi-slot)
       echo "parallel-$n: очередь слотов (слотов=$(bench_slots)): N>$(bench_slots) ждут свободный слот" ;;
@@ -1381,7 +1381,7 @@ sys.exit(0 if d.get("status")=="ok" and d.get("model") and not d.get("loading_mo
 
   log "сценарии quick"
   bench_solo solo-code "$BENCH_TMP/c_code.txt" 400
-  MED_SOLO_CODE=$(bench_med solo-code 3 || true)
+  MED_SOLO_CODE=$(bench_med solo-code 4 || true)
   bench_solo solo-prose "$BENCH_TMP/c_prose.txt" 400
   bench_ttft
 
