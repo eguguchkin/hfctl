@@ -342,6 +342,12 @@ apply_profile() {  # apply_profile <id> — ключи движка из таб�
       cfgset serve.continuous_batch_size 4
       cfgset serve.vmm_batch true
       cfgset serve.batch_sampled true
+      cfgset serve.batch_nonexact false      # ВАЖНО: qwen4 lanes живут ТОЛЬКО на
+      # Exact-роуте (batch_staging.rs:569: Nonexact → refuse 'only the exact
+      # lane route'). Ключ наследуется от 27b-single (там true) — если не
+      # сбросить явно, flash молча теряет lanes → serial. Корень «lanes-загадки»
+      # 2026-11-09: не moving tag, а leftover nonexact=true от 27b-single.
+      cfgset memory.session_cache_bytes 12884901888  # 12 GiB: полный 262K-снапшот 8.78 GiB + запас (Э-3 §4.2)
       ;;
     *)  # 27b-single (default)
       cfgset speculation.dflash on
@@ -351,6 +357,7 @@ apply_profile() {  # apply_profile <id> — ключи движка из таб�
       cfgset serve.continuous_batch_size 4
       cfgset serve.vmm_batch true
       cfgset serve.batch_nonexact true
+      cfgset memory.session_cache_bytes 0   # Qwen3.5: engine-session cache не работает (disk tier инертен) — 0 экономит 8 GiB GPU-RAM
       ;;
   esac
 }
