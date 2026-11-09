@@ -11,6 +11,9 @@
 #                                  конфиг автозапуска; недостающие модели
 #                                  докачиваются с вопросом)
 #   status [--json] | logs [-f] [-n N]
+#   watch [--interval N]         — живой наблюдатель: очередь/обслужено/tok-s
+#                                  последнего done/кэш (cached tokens) и
+#                                  температура GPU; в простое молчит
 #   on | off                     — автозапуск вкл / выкл (off = стоп + снятие
 #                                  с автозапуска; файлы/модели/образ целы)
 #   uninstall [--purge-models] [--purge-image]
@@ -615,6 +618,7 @@ print("health:", st, "| модель:", d.get("model"), "| режим:", c.get("
   echo "$hline"
   echo "── контейнеры ──"
   podman ps -a --filter "name=hipfire" --format 'table {{.Names}}\t{{.Status}}\t{{.Ports}}'
+  echo "(живой наблюдатель запросов: hfctl watch)"
 }
 
 cmd_logs() {
@@ -629,6 +633,106 @@ cmd_logs() {
     esac
   done
   podman logs $follow -t --tail "$n" "$CONTAINER" 2>&1
+}
+
+gpu_temp() {  # °C самой горячей AMD-карты ('' если не видно); чтение /sys — на хосте
+  local card hw v t max=""
+  for card in /sys/class/drm/card[0-9]*; do
+    [ -r "$card/device/vendor" ] || continue
+    case "$(cat "$card/device/vendor" 2>/dev/null || true)" in 0x1002) ;; *) continue ;; esac
+    for hw in "$card"/device/hwmon/hwmon*/; do
+      [ -r "${hw}temp1_input" ] || continue
+      t=$(cat "${hw}temp1_input" 2>/dev/null || true)
+      case "$t" in ''|*[!0-9]*) continue ;; esac
+      if [ -z "$max" ] || [ "$t" -gt "$max" ]; then max="$t"; fi
+    done
+  done
+  [ -n "$max" ] && echo "$((max / 1000))"
+}
+isint() { case "$1" in ''|*[!0-9]*) return 1 ;; *) return 0 ;; esac; }
+
+cmd_watch() {  # живой наблюдатель обработки: /stats + /metrics + температура GPU
+  # («агент работает, а в логах тишина» — очередь и виден факт обработки).
+  # Философия тихого стриминга: строка только на ИЗМЕНЕНИИ видимых счётчиков,
+  # в простое — heartbeat раз в 60 c; недоступность — каждые 30 c, самолечение.
+  local usage="использование: hfctl watch [--interval N]" interval=2
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --interval=*) interval="${1#*=}" ;;
+      --interval)   [ $# -ge 2 ] || die "$usage"; interval="$2"; shift ;;
+      *)            die "$usage" ;;
+    esac
+    shift
+  done
+  isint "$interval" || die "интервал должен быть целым числом секунд"
+  [ "$interval" -ge 1 ] || die "интервал должен быть ≥ 1 с"
+
+  local now ts temp line q served recent retries mval cache fails
+  local prev_q="" prev_served="" prev_cache="" prev_fails=""
+  local last_print=0 last_down=-999
+  while :; do
+    now=$(date +%s)
+    temp=$(gpu_temp || true)
+    q="-"; served="-"; recent="-"; retries="-"; cache=""; fails=""
+    mval=$(curl -fsS -m 3 "http://127.0.0.1:$PORT/stats" 2>/dev/null || true)
+    if [ -z "$mval" ]; then
+      # недоступность: первое сообщение сразу, дальше раз в ~30 c; база
+      # сравнения сбрасывается на КАЖДОМ тике простоя — после поднятия
+      # всегда печатается свежая строка без ложных дельт
+      if [ $((now - last_down)) -ge 30 ]; then
+        ts=$(date +%H:%M:%S)
+        echo "$ts сервер недоступен (нет /stats на :$PORT); жду…"
+        last_down=$now; last_print=$now
+      fi
+      prev_q=""; prev_served=""; prev_cache=""; prev_fails=""
+      sleep "$interval"; continue
+    fi
+    read -r q served recent retries <<<"$(printf '%s' "$mval" | python3 -c '
+import json,sys
+try: d=json.loads(sys.stdin.read())
+except Exception: d={}
+v=lambda k: "-" if d.get(k) is None else d.get(k)
+print(v("queue_depth"), v("requests_served"), v("recent_tok_s"), v("retries_attempted"))' || true)"
+    mval=$(curl -fsS -m 3 "http://127.0.0.1:$PORT/metrics" 2>/dev/null || true)
+    cache=$(printf '%s\n' "$mval" | awk -v p="hipfire_cached_prompt_tokens_total" '$1==p{print $2; exit}')
+    fails=$(printf '%s\n' "$mval" | awk -v p="hipfire_requests_failed_total" '$1==p{print $2; exit}')
+    cache=${cache%.*}; fails=${fails%.*}
+
+    if [ "$q" != "$prev_q" ] || [ "$served" != "$prev_served" ] \
+       || [ "${cache:-}" != "$prev_cache" ] || [ "${fails:-}" != "$prev_fails" ]; then
+      ts=$(date +%H:%M:%S)
+      line="$ts  очередь: $q │ обслужено: $served"
+      if isint "$served" && isint "$prev_served" && [ "$served" -gt "$prev_served" ]; then
+        line+=" (+$((served - prev_served)))"
+        # дельта кэша — только ненулевая: гонка тиков (кэш обновился раньше
+        # счётчика обслуженных) не порождает «(+0 tokens)»
+        if isint "$cache" && isint "$prev_cache" && [ "$((cache - prev_cache))" -gt 0 ]; then
+          line+=" │ кэш: $cache (+$((cache - prev_cache)) tokens)"
+        elif [ -n "$cache" ]; then
+          line+=" │ кэш: $cache"
+        fi
+      elif [ -n "$cache" ]; then
+        line+=" │ кэш: $cache"
+      fi
+      line+=" │ done: $recent tok/s"
+      if isint "$fails" && [ "$fails" -gt 0 ]; then line+=" │ ошибки: $fails"; fi
+      if [ -n "$temp" ]; then line+=" │ GPU: ${temp}°C"; else line+=" │ GPU: ?"; fi
+      echo "$line"
+      last_print=$now
+      prev_q="$q"; prev_served="$served"; prev_cache="${cache:-}"; prev_fails="${fails:-}"
+    elif [ $((now - last_print)) -ge 60 ]; then
+      ts=$(date +%H:%M:%S)
+      if [ "$q" = "0" ]; then
+        echo "$ts обменов нет (очередь: 0, обслужено: $served, GPU: ${temp:-?}°C)"
+      else
+        # долгая генерация не меняет счётчик served почти минуту —
+        # «тишина» тут значит «работает», и это надо произнести
+        echo "$ts обработка идёт (очередь: $q, обслужено: $served, GPU: ${temp:-?}°C)"
+      fi
+      last_print=$now
+    fi
+    sleep "$interval"
+  done
 }
 
 # скрытый алиас совместимости: mode single|slots [N] == use 27b-*
@@ -1499,6 +1603,7 @@ case "$cmd" in
   off)          cmd_off ;;
   status)       cmd_status "$@" ;;
   logs)         cmd_logs "$@" ;;
+  watch)        cmd_watch "$@" ;;
   doctor)       cmd_doctor ;;
   models)       cmd_models ;;
   pull)         cmd_pull "$@" ;;
@@ -1512,6 +1617,6 @@ case "$cmd" in
   _boot)        cmd_boot ;;
   uninstall)    cmd_uninstall "$@" ;;
   "")           usage ;;
-  *)            echo "неизвестная команда '$cmd'. Команды: install | use <profile> | status [--json] | logs | on | off | doctor | models | pull <profile> | bench [full] | uninstall" \
+  *)            echo "неизвестная команда '$cmd'. Команды: install | use <profile> | status [--json] | logs | watch | on | off | doctor | models | pull <profile> | bench [full] | uninstall" \
                   " (алиасы: up|down|mode|autostart|noautostart). Профили: $PROFILE_LIST" >&2; exit 1 ;;
 esac
