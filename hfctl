@@ -1612,14 +1612,16 @@ cmd_uninstall() {
   cmd_off || true
   ( cd "$STACK_DIR" 2>/dev/null && compose down 2>&1 | tail -2 ) || true
   podman volume rm hipfire_hipfire-config hipfire_hipfire-kernels 2>/dev/null || true
-  # модели живут внутри стека: при сохранении — временно переезжают, потом назад
+  # модели живут в базе (models/<сет>/ на ВСЕ сеты!) — при сохранении
+  # переезжает БАЗА целиком: иначе rm -rf $STACK_DIR сносит чужие сеты
   keep=""
-  if [ "$purge_models" != 1 ] && [ -d "$MODELS_DIR" ]; then
-    keep="$(dirname "$STACK_DIR")/.hfctl-models-$$"
-    mv "$MODELS_DIR" "$keep"
+  if [ "$purge_models" != 1 ] && [ -d "$MODELS_BASE" ]; then
+    keep="$STACK_DIR.hfctl-models-$$"
+    mkdir -p "$(dirname "$keep")"
+    mv "$MODELS_BASE" "$keep"
   fi
   rm -rf "$STACK_DIR"
-  if [ -n "$keep" ]; then mkdir -p "$STACK_DIR"; mv "$keep" "$MODELS_DIR"; fi
+  if [ -n "$keep" ]; then mkdir -p "$(dirname "$MODELS_BASE")"; mv "$keep" "$MODELS_BASE"; fi
   if [ -f /etc/security/limits.d/99-hipfire-memlock.conf ]; then
     sudo rm -f /etc/security/limits.d/99-hipfire-memlock.conf
   fi
