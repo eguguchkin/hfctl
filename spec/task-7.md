@@ -103,10 +103,42 @@
 - Регресс-минимум: `status [--json]`, `logs -n 5`, `on/off`, `watch`
   (2 тика) — поведение без изменений.
 
-## Оценка
+## Уроки приёмки (2026-11-09, FAEX/EVO)
 
-~1–2 часа с приёмкой. Единственный непроверенный механически риск —
-bind-в-bind (models внутри state): приёмка пункт 4 это закроет;
-если podman rootless откажет — план Б: поднять models-маунт на уровень
-`/home/hipfire/.hipfire/models` с отдельным якорем (проверка в
-acceptance определит).
+- **Бэкап-восстановление state требует recreate**: вложенный bind моделей
+  навешивается на inode каталога точки монтирования внутри state-каталога;
+  стирание/восстановление каталогов под ним оставляет живой контейнер со
+  СТАРЫМ inode → внутри контейнера `/home/hipfire/.hipfire/models` виден
+  пустым → «model not found locally: … run hipfire pull» (404 на chat,
+  хотя /v1/models отвечает из registry-кэша и health зелёный). Лечение:
+  после restore — `compose up -d --force-recreate`. README описывает
+  каноничную процедуру `tar --exclude='*/config/models'` + recreate.
+- В legacy-вольюме остаётся ХВОСТ после миграции: serve.pid и daemon-*.pid
+  чистятся движком при остановке старого контейнера — diff file-list
+  миграции отличается на эти pid-файлы; это норма (артефакт времени,
+  config.toml перезаписан apply_profile, pid-файлы движок создаёт заново).
+- Smoke на ФРЕШЕ движке: первый запрос может варить недостающие ядра
+  (72 «unplanned kernel … bound lazily» на evo) > 120 c
+  → curl -m 120 рвал соединение, ответ пустой, FATAL «смоук не прошёл».
+  Патч: smoke `-m 300` (c49959e).
+- `uninstall` был интерактивным без неинтерактивного пути: добавлен флаг
+  `--yes` (c49959e); до этого вместе с `--yes` работал только env HFCTL_YES.
+- Kernel-кэш мигрируется (36K, gfx1151/), но движок всё равно лениво
+  биндит «unplanned» ядра («module already compiled» — биндинг вне
+  предсказанного плана, не пересборка); время старта это не портит,
+  per-профильное дублирование 36K × N профилей — безвредно.
+
+## DoD-чеклист фактический
+- FAEX: миграция 140K+36K ✅; mounts bind (config+kernel+models) ✅;
+  НОВЫХ томов не создаётся ✅; lanes=4 staged ✅; per-профиль config.toml
+  (batch_nonexact=false и др.) ✅; doctor: state-строка + legacy-WARN ✅;
+  smoke 200 ✅ (после recreate); session-cache внутри config/ ✅.
+- EVO: uninstall --yes → «как никогда не было» (profiles/ и legacy-вольюмы
+  отсутствуют); чистый install → bind-маунты, doctor БЕЗ legacy-WARN,
+  27b-single healthy, smoke ×2, dflash — подтверждается фазой 2 (текущий
+  прогон, результат добавлю в STATE).
+- Итерацию «uninstall --purge-models --purge-image» (полный purge моделей)
+  на evo НЕ гоняли — уничтожило бы 130 GB моделей (повторное скачивание
+  часов). Purge-пути по коду: `rm -rf $STACK_DIR` (включает profiles/)
+  + `podman volume rm` legacy-имён (идемпотентен). Остаток: проверить при
+  будущей полной зачистке.
