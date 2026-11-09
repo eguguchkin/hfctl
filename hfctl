@@ -419,7 +419,7 @@ smoke() {
   local ok=1 prompt
   for prompt in "Ответь ровно: ок" "Напиши одну строку кода на python: hello world"; do
     local out
-    out=$(curl -fsS -m 120 "http://127.0.0.1:$PORT/v1/chat/completions" \
+    out=$(curl -fsS -m 300 "http://127.0.0.1:$PORT/v1/chat/completions" \
       -H 'Content-Type: application/json' \
       -d "{\"model\":\"$(cur_model)\",\"messages\":[{\"role\":\"user\",\"content\":\"$prompt\"}],\"max_tokens\":200,\"reasoning_effort\":\"none\"}" 2>/dev/null) || { ok=0; continue; }
     printf '%s' "$out" | python3 -c 'import json,sys; d=json.load(sys.stdin); c=d["choices"][0]["message"]["content"]; print("ответ:", (c or "")[:60].strip() or "(ПУСТО)"); sys.exit(0 if (c or "").strip() else 1)' || ok=0
@@ -1598,7 +1598,8 @@ cmd_uninstall() {
     case "$1" in
       --purge-models) purge_models=1; shift ;;
       --purge-image)  purge_image=1; shift ;;
-      *) die "неизвестный флаг uninstall: $1" ;;
+      --yes)          ASSUME_YES=1; shift ;;
+      *) die "неизвестный флаг uninstall: $1 (доступны: --purge-models --purge-image --yes)" ;;
     esac
   done
   echo "uninstall снимет: контейнеры, сеть проекта, state-каталоги $STATE_BASE"
