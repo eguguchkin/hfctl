@@ -84,8 +84,11 @@ hfctl bench --json > b.json # машиночитаемый артефакт
 
 ## Как это устроено
 
-- Всё в одном каталоге `~/hipfire/`: `hfctl`, `models/`, compose-файлы,
-  `.env`. Вне каталога: systemd user юниты, контейнеры/volumes podman,
+- Всё в одном каталоге `~/hipfire/`: `hfctl`, `models/<сет>/` (модели,
+  per-сет), `profiles/<профиль>/{config,kernel}` (состояние движка per-профиль:
+  конфиг, disk-тир контекст-кэша в `config/session-cache/`, кэш прекомпилированных
+  ядер; бэкап = `tar` каталога), compose-файлы, `.env`. Вне каталога:
+  systemd user юниты, контейнеры podman,
   `/etc/security/limits.d/99-hipfire-memlock.conf`, группа `render`, linger.
 - Автозапуск: systemd user unit (boot) + watchdog-таймер 1 мин (краши;
   rootless podman не переживает отсоединение compose, поэтому надзор внешний).

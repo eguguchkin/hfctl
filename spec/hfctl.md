@@ -34,9 +34,11 @@ hfctl install             # preflight → модели → конфиг → ст
 - `hfctl` остаётся однофайловым и по-прежнему запускаемым напрямую
   (`bash hfctl install`) — свойство «scp на голую машину» сохраняется.
 - Все артефакты инсталляции — в `~/hipfire/` (бинарь `~/hipfire/hfctl`,
-  модели `~/hipfire/models/`, compose-файлы, `.env`, логи). Вне каталога:
-  systemd-user юниты, образ ghcr, podman volumes/network,
-  `limits.d/99-<user>-memlock.conf`, группа render, linger.
+  модели `~/hipfire/models/<сет>/` per-сет, состояние движка per-профиль
+  `~/hipfire/profiles/<профиль>/{config,kernel}` (этап 7: явные bind-маунты
+  вместо named volumes; disk-тир кэша — `profiles/<профиль>/config/session-cache/`),
+  compose-файлы, `.env`, логи). Вне каталога: systemd-user юниты, образ ghcr,
+  podman network, `limits.d/99-<user>-memlock.conf`, группа render, linger.
 
 ## 3 · Карта команд
 
@@ -50,7 +52,7 @@ hfctl install             # preflight → модели → конфиг → ст
 (когда `served` минутами не меняется) — `обработка идёт (очередь: N…)` тем же тиком; сервер недоступен — сообщение раз в ~30 c, восстановление без перезапуска; первую строку печатает сразу. Выход Ctrl-C. Печатает факт «обработка идёт» там, где `podman logs` молчит (движок не логирует жизненный цикл запросов) |
 | `hfctl on` | Включить автозапуск (юнит+таймер+linger) и поднять стек |
 | `hfctl off` | Остановить стек **и** снять с автозапуска (юниты disable, вотчдог выключен, linger off). Файлы, модели, образ целы |
-| `hfctl uninstall [--purge-models] [--purge-image]` | Полная зачистка: контейнеры, сеть проекта, volumes config/kernels, юниты, limits.d, маркеры, `~/hipfire` (модели при сохранении переезжают и возвращаются). Подтверждение с перечнем; по умолчанию модели и образ щадит |
+| `hfctl uninstall [--purge-models] [--purge-image]` | Полная зачистка: контейнеры, сеть проекта, state-каталоги `profiles/` + legacy-вольюмы, юниты, limits.d, маркеры, `~/hipfire` (модели при сохранении переезжают и возвращаются). Подтверждение с перечнем; по умолчанию модели и образ щадит |
 
 Вспомогательные:
 

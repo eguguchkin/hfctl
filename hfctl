@@ -36,6 +36,10 @@ IMAGE="${HFCTL_IMAGE:-ghcr.io/warpfront/hipfire:0.4.5}"
 STACK_DIR="${HFCTL_DIR:-$HOME/hipfire}"          # всё инсталляция здесь (compose, .env, бинарь)
 MODELS_BASE="${HFCTL_MODELS:-$STACK_DIR/models}" # база моделей; внутри — каталог-сет на профиль
 MODELS_DIR="$MODELS_BASE/27b"                    # маунт; пересчитывается set_models_dir()
+# per-профиль state-каталоги (этап 7): config (home движка: конфиг, disk-тир
+# кэша, pid) и kernel (кэш прекомпилированных ядер). Bind вместо named
+# volumes — состояние явное, per-профиль по конструкции, backup = tar.
+STATE_BASE="${HFCTL_STATE:-$STACK_DIR/profiles}"
 PORT="${HFCTL_PORT:-11435}"
 BIND="${HFCTL_BIND:-0.0.0.0}"                    # 0.0.0.0 = LAN без ключа; 127.0.0.1 = локально
 # ВАЖНО: в контейнер models монтируется на /home/hipfire/.hipfire/models —
@@ -105,6 +109,28 @@ profile_avail_list() {
     [ "$(ram_pool_gib)" -ge "$(profile_field "$p" 4)" ] && out="$out $p"
   done
   echo "${out:-—}"
+}
+
+# ── state-каталоги по профилям (этап 7: явные bind вместо named volumes) ────
+# config/ → /home/hipfire/.hipfire, kernel/ → /var/cache/hipfire.
+# disk-тир контекст-кэша (session-cache/) живёт внутри config/ → per-профиль
+# автоматически; RAM-тир так и был per-процесс (умирает при recreate).
+state_dir() { echo "$STATE_BASE/$1"; }
+migrate_state() {  # migrate_state <profile> — legacy named volumes → profiles/<p>
+  # одноразово, idempotent: копирует _data в каталог профиля, если тот пуст
+  # (в legacy-вольюме у юзера может быть гигабайты disk-тира — копируем всё).
+  local base="$STATE_BASE/$1" vdata
+  mkdir -p "$base/config" "$base/kernel"
+  vdata=$(podman volume inspect hipfire_hipfire-config --format '{{.Mountpoint}}' 2>/dev/null || true)
+  if [ -n "$vdata" ] && [ -d "$vdata" ] && [ -z "$(ls -A "$base/config" 2>/dev/null)" ]; then
+    cp -a "$vdata/." "$base/config/"
+    log "state: миграция legacy-volume → $(state_dir "$1")/config (вкл. session-cache)"
+  fi
+  vdata=$(podman volume inspect hipfire_hipfire-kernels --format '{{.Mountpoint}}' 2>/dev/null || true)
+  if [ -n "$vdata" ] && [ -d "$vdata" ] && [ -z "$(ls -A "$base/kernel" 2>/dev/null)" ]; then
+    cp -a "$vdata/." "$base/kernel/"
+    log "state: миграция legacy-volume → $(state_dir "$1")/kernel"
+  fi
 }
 
 # ── каталоги моделей по сетам (изоляция профилей: сервер видит только свой
@@ -226,8 +252,10 @@ x-hipfire-engine: &hipfire-engine
     - ROCR_VISIBLE_DEVICES
   volumes:
     - ${HIPFIRE_MODELS_PATH:-hipfire-models}:/home/hipfire/.hipfire/models
-    - hipfire-config:/home/hipfire/.hipfire
-    - hipfire-kernels:/var/cache/hipfire
+    # state-каталоги активного профиля (этап 7: явные bind; HIPFIRE_STATE_DIR
+    # пишется в .env при install/use; дефолт — защита от ручной правки .env)
+    - ${HIPFIRE_STATE_DIR:-$HOME/hipfire/profiles/27b-single}/config:/home/hipfire/.hipfire
+    - ${HIPFIRE_STATE_DIR:-$HOME/hipfire/profiles/27b-single}/kernel:/var/cache/hipfire
 
 services:
   hipfire-init:
@@ -254,11 +282,6 @@ services:
       timeout: 5s
       retries: 4
       start_period: 15m
-
-volumes:
-  hipfire-models:
-  hipfire-config:
-  hipfire-kernels:
 COMPOSE
 
   cat > "$STACK_DIR/compose.halo.yml" <<'HALO'
@@ -309,6 +332,7 @@ HIPFIRE_BIND=$BIND
 HIPFIRE_UI=0
 HIPFIRE_SERVE_ARGS=
 HIPFIRE_MODELS_PATH=$MODELS_DIR
+HIPFIRE_STATE_DIR=$STATE_BASE/$prof
 HIPFIRE_IMAGE=$IMAGE
 COMPOSE_FILE=compose.yml:compose.halo.yml:compose.local.yml
 EOF
@@ -482,6 +506,7 @@ cmd_install() {
   migrate_models
   set_models_dir "$prof"
   preflight
+  migrate_state "$prof"        # legacy named volumes → profiles/<prof> (один раз)
   write_stack_files
   # приоритет: HFCTL_MODEL > сохранённая при миграции модель > дефолт профиля
   MODEL_DEFAULT="${HFCTL_MODEL:-${MODEL_DEFAULT:-$(profile_field "$prof" 1)}}"
@@ -549,6 +574,7 @@ cmd_use() {
     set_models_dir "$p"
   fi
   preflight
+  migrate_state "$p"           # legacy named volumes → profiles/<p> (один раз)
   pull_profile_models "$p"
   MODEL_DEFAULT="${HFCTL_MODEL:-$(profile_field "$p" 1)}"
   write_env "$p" "$MODEL_DEFAULT"
@@ -862,6 +888,15 @@ cmd_doctor() {  # диагностика без изменений (spec §3): g
   echo "── установка ──"
   if [ -f "$STACK_DIR/.env" ]; then
     echo "стек: $STACK_DIR (профиль $(cur_profile), модель $(cur_model))"
+    local sd="$STATE_BASE/$(cur_profile)"
+    if [ -d "$sd/config" ] && [ -w "$sd/config" ] && [ -d "$sd/kernel" ] && [ -w "$sd/kernel" ]; then
+      echo "state: $sd (per-профиль config+kernel; disk-тир кэша — внутри config/)"
+    else
+      warn "state: $sd отсутствует или не записуем — пересоздай стек (hfctl install)"
+    fi
+    if podman volume exists hipfire_hipfire-config 2>/dev/null; then
+      warn "state: legacy-вольюмы (hipfire_hipfire-config/kernels) ещё живут (установка до этапа 7) — удаляются uninstall"
+    fi
   else
     echo "стек: НЕ УСТАНОВЛЕН ($STACK_DIR/.env нет) — 'hfctl install'"
   fi
@@ -1566,7 +1601,8 @@ cmd_uninstall() {
       *) die "неизвестный флаг uninstall: $1" ;;
     esac
   done
-  echo "uninstall снимет: контейнеры, сеть проекта, volumes (config/kernels),"
+  echo "uninstall снимет: контейнеры, сеть проекта, state-каталоги $STATE_BASE"
+  echo "(конфиг/disk-тир кэша/kernels на профиль) + legacy-вольюмы,"
   echo "юниты+таймер автозапуска, limits.d, каталог стека $STACK_DIR (включая hfctl)."
   echo "Модели $MODELS_DIR: $([ "$purge_models" = 1 ] && echo 'УДАЛЯЮТСЯ (--purge-models)' || echo 'СОХРАНЯЮТСЯ (переезжают в стеке)')"
   echo "Образ $IMAGE: $([ "$purge_image" = 1 ] && echo 'УДАЛЯЕТСЯ (--purge-image)' || echo 'остаётся (--purge-image — удалить)')"
