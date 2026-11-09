@@ -12,7 +12,7 @@ set -euo pipefail
 
 STACK_DIR="${HFCTL_DIR:-$HOME/hipfire}"
 BIN_DIR="${HFCTL_BIN_DIR:-$HOME/.local/bin}"
-RAW_URL="${HFCTL_RAW_URL:-https://raw.githubusercontent.com/ORG/hfctl/master}"
+RAW_URL="${HFCTL_RAW_URL:-https://raw.githubusercontent.com/eguguchkin/hfctl/main}"
 
 err() { printf '\033[1;31mERROR:\033[0m %s\n' "$*" >&2; }
 ok()  { printf '\033[1;32mOK:\033[0m %s\n' "$*"; }

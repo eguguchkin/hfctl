@@ -9,7 +9,7 @@
 ## Быстрый старт
 
 ```bash
-git clone https://github.com/ORG/hfctl.git
+git clone https://github.com/eguguchkin/hfctl.git
 cd hfctl
 ./install.sh          # кладёт hfctl в ~/.local/bin (без sudo)
 hfctl doctor          # (опционально) проверка железа до скачивания
