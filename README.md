@@ -11,12 +11,10 @@
 ```bash
 git clone https://github.com/eguguchkin/hfctl.git
 cd hfctl
-./install.sh          # кладёт hfctl в ~/.local/bin (без sudo)
+./install.sh          # кладёт hfctl в стек ~/hipfire/ + симлинк в ~/.local/bin (без sudo)
 hfctl doctor          # (опционально) проверка железа до скачивания
 hfctl install         # сервер: ~34 GB моделей, потом healthy + smoke
 ```
-
-Одной строкой (вместо clone): `curl -fsSL <raw_url>/install.sh | bash`.
 
 После `hfctl install` сервер на `http://<IP>:11435` (LAN, без ключа),
 автозапуск при загрузке включён, падения поднимает вотчдог.
@@ -84,12 +82,17 @@ hfctl bench --json > b.json # машиночитаемый артефакт
 
 ## Как это устроено
 
-- Всё в одном каталоге `~/hipfire/`: `hfctl`, `models/<сет>/` (модели,
-  per-сет), `profiles/<профиль>/{config,kernel}` (состояние движка per-профиль:
-  конфиг, disk-тир контекст-кэша в `config/session-cache/`, кэш прекомпилированных
-  ядер; бэкап = `tar` каталога), compose-файлы, `.env`. Вне каталога:
-  systemd user юниты, контейнеры podman,
+- Всё в одном каталоге `~/hipfire/`: `hfctl` (диспетчер), `lib/` (модули),
+  `tpl/` (шаблоны: compose/.env/юниты/python/bench-фикстура), `models/<сет>/`
+  (модели, per-сет), `profiles/<профиль>/{config,kernel}` (состояние движка
+  per-профиль: конфиг, disk-тир контекст-кэша в `config/session-cache/`,
+  кэш прекомпилированных ядер; бэкап = `tar` каталога), compose-файлы, `.env`.
+  Вне каталога: systemd user юниты, контейнеры podman,
   `/etc/security/limits.d/99-hipfire-memlock.conf`, группа `render`, linger.
+- Дистрибуция: `git clone` + `./install.sh` (копирует `hfctl`, `lib/`,
+  `tpl/` в стек и ставит симлинк `~/.local/bin/hfctl`). Обновление бинаря —
+  свежий клон + тот же `install.sh`: перезаписываются ровно эти три элемента,
+  модели/state/конфиги в стеке остаются.
 - Автозапуск: systemd user unit (boot) + watchdog-таймер 1 мин (краши;
   rootless podman не переживает отсоединение compose, поэтому надзор внешний).
 - Модели тянет официальный `hipfire pull` (sha256-верификация, идемпотентно).

@@ -1,0 +1,11 @@
+# hfctl (сгенерировано; после ручной правки — hfctl up)
+HFCTL_PROFILE=__PROFILE__
+HIPFIRE_MODEL=__MODEL__
+HIPFIRE_PORT=__PORT__
+HIPFIRE_BIND=__BIND__
+HIPFIRE_UI=0
+HIPFIRE_SERVE_ARGS=
+HIPFIRE_MODELS_PATH=__MODELS_DIR__
+HIPFIRE_STATE_DIR=__STATE_DIR__
+HIPFIRE_IMAGE=__IMAGE__
+COMPOSE_FILE=compose.yml:compose.halo.yml:compose.local.yml

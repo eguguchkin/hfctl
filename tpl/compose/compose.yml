@@ -1,0 +1,54 @@
+# hipfire compose stack (upstream hipfire 0.4.5, monitoring profiles trimmed).
+name: hipfire
+
+x-hipfire-engine: &hipfire-engine
+  image: ${HIPFIRE_IMAGE:-ghcr.io/warpfront/hipfire:latest}
+  devices:
+    - /dev/kfd
+    - /dev/dri
+  group_add:
+    - video
+    - render
+  security_opt:
+    - seccomp=unconfined
+  annotations:
+    run.oci.keep_original_groups: "1"
+  environment:
+    - HIPFIRE_MODEL=${HIPFIRE_MODEL:-qwen3.8:27b-mq4-xts}
+    - HIPFIRE_SERVE_UI=${HIPFIRE_UI:-0}
+    - HIPFIRE_SERVE_ARGS=${HIPFIRE_SERVE_ARGS:-}
+    - HF_TOKEN
+    - HIPFIRE_DEVICES
+    - ROCR_VISIBLE_DEVICES
+  volumes:
+    - ${HIPFIRE_MODELS_PATH:-hipfire-models}:/home/hipfire/.hipfire/models
+    # state-каталоги активного профиля (этап 7: явные bind; HIPFIRE_STATE_DIR
+    # пишется в .env при install/use; дефолт — защита от ручной правки .env)
+    - ${HIPFIRE_STATE_DIR:-$HOME/hipfire/profiles/27b-single}/config:/home/hipfire/.hipfire
+    - ${HIPFIRE_STATE_DIR:-$HOME/hipfire/profiles/27b-single}/kernel:/var/cache/hipfire
+
+services:
+  hipfire-init:
+    <<: *hipfire-engine
+    command: pull --yes ${HIPFIRE_MODEL:-qwen3.8:27b-mq4-xts}
+    restart: "no"
+
+  hipfire:
+    <<: *hipfire-engine
+    command: ["serve"]
+    init: true
+    restart: unless-stopped        # переподнимание при краше — за podman
+    depends_on:
+      hipfire-init:
+        condition: service_completed_successfully
+    ports:
+      - ${HIPFIRE_BIND:-127.0.0.1}:${HIPFIRE_PORT:-11435}:11435
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - |
+          body=$$(curl -fsS http://127.0.0.1:11435/health) && ! printf '%s' "$$body" | grep -Eq '"loading_model"[[:space:]]*:[[:space:]]*"'
+      interval: 15s
+      timeout: 5s
+      retries: 4
+      start_period: 15m

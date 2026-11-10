@@ -251,3 +251,39 @@ VMM QSA-стэйт Flash-Next заявлен «gfx1151/gfx1201 automatic»).
 переключении профиля); модели остаются per-сет; миграция из legacy-
 вольюма в install/use; purge в uninstall. Приёмка на FAEX (flash
 активен).
+
+---
+
+## Этап 8 — рефакторинг: разложение на `lib/` + `tpl/` + дистрибуция деревом
+
+Полное описание: `spec/task-8.md` (brief + Design architect'а + Test
+strategy + addendum orchestrator'а). Кратко: однофайловый `hfctl`
+(1661 строк) раскладывается на дерево: диспетчер `hfctl` (config +
+source + dispatch, ≤ ~450 строк) + `lib/*.sh` (10 модулей) + `tpl/`
+(все инлайн-шаблоны без исключений: compose-yaml, systemd-юниты, `.env`,
+python-помощники, bench-фикстура). Дистрибуция — только `git clone` +
+`./install.sh` (curl-режим и «одной строкой» удалены, решение
+пользователя 2026-11-10): install.sh копирует `hfctl`+`lib/`+`tpl/`
+в стек, симлинк в bin, PATH-подсказка; вне дерева — внятный отказ.
+**Поведение сохраняется байт-в-байт**; единственные осознанные
+изменения вывода: usage-строки 3–7 (формулировки под git-clone) и
+текст ошибки install.sh вне дерева.
+
+### DoD (внутренние, dev-контейнер) — чекбоксы в `spec/task-8.md`
+- [ ] 1–9 (раскладка/0 python3 -c/0 heredoc/0 фикстур, bash -n +
+      shellcheck-базлайн, golden-file parity байт-в-байт, CLI-parity
+      (usage против NEW-golden), парность чистых функций + md5
+      фикстуры, install.sh sandbox, bench-python parity + ttft fake-SSE,
+      README, spec §2/plan/state).
+
+### DoD (внешние, реальные машины — ТОЛЬКО после предупреждения
+### пользователя и его подтверждения; машины в работе)
+- [ ] 10. Прод-машина (60 GiB): обновление деревом через install.sh
+      (healthy до/после) → полный цикл: use↔use (27b-slots → 27b-single),
+      off→on, ребут → сам подъём канона, healthy + smoke. Итог: 27b-single
+      healthy.
+- [ ] 11. Вторая машина (128 GB, лёгкое): обновление деревом через
+      install.sh без остановки → flash-multi healthy + smoke.
+- [ ] 12. hflab: AGENTS.md (hfctl-секция: дерево, дистрибуция) +
+      STATE.md; артефакты приёмки — `.local-analysis/` (в hfctl-репо —
+      0 имён хостов/IP/логов, AGENTS правило 7).

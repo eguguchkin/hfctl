@@ -1,0 +1,16 @@
+# Strix Halo (XDNA2 NPU): /dev/accel + memlock (upstream hipfire 0.4.5).
+services:
+  hipfire-init:
+    devices:
+      - /dev/accel
+    ulimits:
+      memlock:
+        soft: 1318060032
+        hard: 1318060032
+  hipfire:
+    devices:
+      - /dev/accel
+    ulimits:
+      memlock:
+        soft: 1318060032
+        hard: 1318060032

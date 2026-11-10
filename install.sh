@@ -1,39 +1,42 @@
 #!/usr/bin/env bash
-# install.sh — bootstrap hfctl: кладёт бинарь в стек (~/hipfire/hfctl — там
-# его ждут юниты) и симлинк в ~/.local/bin (без sudo). Сам сервер НЕ ставит
-# — это делает 'hfctl install'.
+# install.sh — bootstrap hfctl: дерево целиком (диспетчер hfctl + lib/ +
+# tpl/) из локального клона (единственный источник) кладёт в стек
+# ~/hipfire/ (там его ждут юниты) и симлинк в ~/.local/bin (без sudo).
+# Сам сервер НЕ ставит — это делает 'hfctl install'.
 #
-# Два способа запуска:
-#   1) из клона репозитория:   git clone <repo> && cd hfctl && ./install.sh
-#   2) одной строкой (curl):   curl -fsSL <raw_url>/install.sh | bash
+# Способ запуска:
+#   git clone <repo> && cd hfctl && ./install.sh
 #
-# Идемпотентен: повторный запуск просто обновляет бинарь (и симлинк).
+# Идемпотентен: повторный запуск из того же клона просто перезаписывает те
+# же элементы (md5-равные). Свежий клон → install.sh = обновление бинаря
+# (AGENTS правило 5); остальное в стеке (models/, profiles/, .env,
+# compose*, benchmarks/) install.sh не трогает.
 set -euo pipefail
 
 STACK_DIR="${HFCTL_DIR:-$HOME/hipfire}"
 BIN_DIR="${HFCTL_BIN_DIR:-$HOME/.local/bin}"
-RAW_URL="${HFCTL_RAW_URL:-https://raw.githubusercontent.com/eguguchkin/hfctl/main}"
 
 err() { printf '\033[1;31mERROR:\033[0m %s\n' "$*" >&2; }
 ok()  { printf '\033[1;32mOK:\033[0m %s\n' "$*"; }
 
-# ── откуда брать hfctl: рядом со скриптом (клон) или из сети (curl|bash) ────
-tmp="$(mktemp)"; trap 'rm -f "$tmp"' EXIT
+# ── источник: дерево рядом со скриптом (git clone); других режимов нет ──────
 script_dir="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" 2>/dev/null && pwd || true)"
-if [ -n "$script_dir" ] && [ -f "$script_dir/hfctl" ]; then
-  cp "$script_dir/hfctl" "$tmp"
-  echo "источник: локальный клон ($script_dir/hfctl)"
-else
-  # curl-режим: качаем в стек
-  echo "источник: $RAW_URL/hfctl"
-  curl -fsSL "$RAW_URL/hfctl" -o "$tmp" || { err "не смог скачать hfctl — проверь сеть или задай HFCTL_RAW_URL"; exit 1; }
+if [ -z "$script_dir" ] || [ ! -f "$script_dir/hfctl" ] \
+   || [ ! -d "$script_dir/lib" ] || [ ! -d "$script_dir/tpl" ]; then
+  err "дерево hfctl неполное: рядом нет lib/ и tpl/ — установи через git clone + ./install.sh"
+  exit 1
 fi
+echo "источник: локальный клон ($script_dir)"
 command -v bash >/dev/null || { err "нужен bash"; exit 1; }
 
-# ── бинарь живёт В СТЕКЕ (источник истины: юниты и вотчдог ссылаются на него)
+# ── бинарь живёт В СТЕКЕ (источник истины: юниты и вотчдог ссылаются на него);
+# обновление = перезапись ровно трёх элементов: hfctl, lib/, tpl/
 mkdir -p "$STACK_DIR"
-install -m 0755 "$tmp" "$STACK_DIR/hfctl"
-ok "hfctl → $STACK_DIR/hfctl"
+rm -rf "${STACK_DIR:?}/hfctl" "${STACK_DIR:?}/lib" "${STACK_DIR:?}/tpl"
+install -m 0755 "$script_dir/hfctl" "$STACK_DIR/hfctl"
+cp -a "$script_dir/lib" "$STACK_DIR/lib"
+cp -a "$script_dir/tpl" "$STACK_DIR/tpl"
+ok "hfctl → $STACK_DIR/hfctl (+lib/, tpl/)"
 
 # ── ~/.local/bin/hfctl = симлинк в стек (одна копия, рассинхрон невозможен) ─
 mkdir -p "$BIN_DIR"
@@ -62,5 +65,5 @@ cat <<EOF
 
 Полезно сразу: 'hfctl doctor' — проверить железо до скачивания.
 Профили: 27b-single | 27b-slots | flash-multi (см. 'hfctl models').
-Обновление бинаря: повтори этот же install.sh (стек останется на месте).
+Обновление бинаря: свежий клон репозитория → тот же install.sh (стек и модели останутся).
 EOF

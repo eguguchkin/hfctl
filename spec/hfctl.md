@@ -23,22 +23,31 @@ hipfire 0.4.5) и по upstream-докам (`docs/SERVE.md`, `docs/MODELS.md`).
 ```bash
 git clone https://github.com/<org>/hfctl.git
 cd hfctl
-./install.sh              # кладёт hfctl в ~/.local/bin (без sudo)
+./install.sh              # кладёт дерево hfctl в стек + симлинк в ~/.local/bin (без sudo)
 hfctl install             # preflight → модели → конфиг → старт → smoke → автозапуск
 ```
 
-- `install.sh` (~30 строк) — **только** bootstrap: копирует `hfctl` в
-  `~/.local/bin/hfctl`, проверяет PATH (не в PATH → печатает строку для
-  `.bashrc`/`.profile`), печатает следующий шаг. Больше ничего.
-  Aльтернатива в README: `curl -fsSL https://raw.githubusercontent.com/.../install.sh | bash`.
-- `hfctl` остаётся однофайловым и по-прежнему запускаемым напрямую
-  (`bash hfctl install`) — свойство «scp на голую машину» сохраняется.
-- Все артефакты инсталляции — в `~/hipfire/` (бинарь `~/hipfire/hfctl`,
-  модели `~/hipfire/models/<сет>/` per-сет, состояние движка per-профиль
-  `~/hipfire/profiles/<профиль>/{config,kernel}` (этап 7: явные bind-маунты
-  вместо named volumes; disk-тир кэша — `profiles/<профиль>/config/session-cache/`),
-  compose-файлы, `.env`, логи). Вне каталога: systemd-user юниты, образ ghcr,
-  podman network, `limits.d/99-<user>-memlock.conf`, группа render, linger.
+- Единственный путь — `git clone` + `./install.sh` (этап 8: curl-режим и
+  «одной строкой» УДАЛЕНЫ, решение пользователя 2026-11-10).
+- `install.sh` — **только** bootstrap: копирует `hfctl`, `lib/`, `tpl/` в
+  `~/hipfire/` (бинарь в стеке, `~/.local/bin/hfctl` = симлинк), проверяет
+  PATH (не в PATH → печатает строку для `.bashrc`/`.profile`), печатает
+  следующий шаг. Больше ничего. Запуск вне дерева (рядом нет
+  `hfctl`+`lib/`+`tpl/`) — внятный отказ с текстом и rc 1.
+- `hfctl` НЕ однофайловый (этап 8): диспетчер `hfctl` (env-конфигурация +
+  `source` модулей + dispatch) + `lib/*.sh` (логические модули) + `tpl/`
+  (все шаблоны: compose-yaml, systemd-юниты, `.env`, python-помощники,
+  bench-фикстура). Дистрибуция и обновление — целым деревом: повтор
+  `install.sh` из того же клона идемпотентен, свежий клон → `install.sh` =
+  обновление (AGENTS правило 5; install.sh перезаписывает ровно
+  `hfctl`+`lib/`+`tpl/`, остальное в стеке не трогает).
+- Все артефакты инсталляции — в `~/hipfire/` (диспетчер `~/hipfire/hfctl` +
+  `lib/`, `tpl/`, модели `~/hipfire/models/<сет>/` per-сет, состояние
+  движка per-профиль `~/hipfire/profiles/<профиль>/{config,kernel}` (этап 7:
+  явные bind-маунты вместо named volumes; disk-тир кэша —
+  `profiles/<профиль>/config/session-cache/`), compose-файлы, `.env`, логи).
+  Вне каталога: systemd-user юниты, образ ghcr, podman network,
+  `limits.d/99-<user>-memlock.conf`, группа render, linger.
 
 ## 3 · Карта команд
 
