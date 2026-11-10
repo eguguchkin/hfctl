@@ -1183,3 +1183,15 @@ C1 `4ad0519`; md5 диспетчера хоста после update = `cd623950`
 пользователя стоит; P2 при повторе идемпотентен и теперь пройдёт гейт).
 Остаётся: полный прогон EXP-003 → result-proof → закрытие DoD 11 →
 DoD 12 → reviewer → C2.
+
+## DoD 11 — external run (оркестратор, 2026-11-10): EXP-003 прогон 4 → PASS
+Четвёртый запуск EXP-003 (после fix-раундов 1–4) на che-FAEX1, `HAVE_REBOOT_BOOT=1`, rc=0:
+P1 пред-чек (flash-multi healthy, mq6-xt уже на диске) → P1.5 lane-бейслайн → P2 update
+из свежего клона GitHub main (UPDATE_OK; lib=10/tpl=6, md5 клон==стек=cd623950…; сервер не
+останавливался, StartedAt не менялся) → P3 use 27b-single (singleton+DFlash, smoke OK;
+disk-тир flash цел) → P4 use flash-multi (строгий идемпотентный pull без докачек;
+`fn-lanes staged` вернулись; конфиг flash байт-в-байт d2cd5ab8…) → P5 off/on →
+P6 ребут (sudo -n) → сам-подъём boot-юнитом из дерева, `_boot` exit 0 → health + smoke +
+lanes → P7 финал: flash-multi, refused=0, прод recovered.
+DoD 11 ЗАКРЫТ. Артефакт: hflab/.local-analysis/task8-exp/EXP-003-faex-full.result.txt
+(260 строк). История убитых прогонов 1–3: *-p1fail-keep / *-run2-startedat-keep / git-история.
