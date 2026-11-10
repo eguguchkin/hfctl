@@ -1037,3 +1037,84 @@ Round 1a).
 циклом — при GO (у пользователя уже стоит; машина свободна; E2E до ~90 мин
 с учётом mq6-xt докачки ~21 GB). По-прежнему остаётся только фактический
 прогон → result-proof → закрытие DoD 11 → DoD 12 → reviewer → C2.
+### Round 3 (2026-11-10, ночь): StartedAt-фикс + живая репетиция P1/P1.5 (triage: `test` —
+дефект HARNESS'а tester'а; продукт не менялся, машина не потревожена —
+сервер Up 24h healthy на всём протяжении раунда, update не начинался:
+md5 диспетчера в стеке по-прежнему `cfba2fbf`).
+
+**Разбор.** Второй прогон EXP-003 упал в P1: «StartedAt контейнера не
+прочитан». Причина: `grep -oE 'StartedAt: [^ ]+$' | cut -d" " -f2` —
+токен-парсер, а `podman inspect -f "{{.State.StartedAt}}"` на хосте
+отдаёт МНОГОСЛОВНОЕ значение «2026-11-09 20:53:36.820919951 +0300 MSK»
+— совпадений нет никогда. DRYRUN это не ловит: canned-данные были
+однословными. **Правило (принимаетсяtester'ом): dry-run покрывает
+разметку/render, но НЕ парсеры живых консольных выводов — парсируемые
+блоки репетировать live read-only.**
+
+**Исправление (EXP-003, product не тронут).**
+1. `startedat_of()`: `sed -n 's/^StartedAt: //p' | tail -1` — вся
+   строка до EOL; guard `case ''|"?"*` → FAIL с action-recipe
+   (ручная проверка podman inspect / сравнение с P1-значением);
+   P2-сравнение — равенство СТРОК (смена StartedAt = recreate был);
+   P1-именно живой формат验证ён (см. ниже).
+2. Греп-пас EXP-003 на другие «[^ ]+$»-парсеры многословных строк:
+   других НЕТ (df avail — одночисловой,('/')[- -oE] у md5/count/lib_mods
+   — свои известные форматы).
+3. **Два НОВЫХ факта, найденных ЖИВОЙ репетицией** (это и есть окупаемость
+   правила):
+   - **AWK-память**: `/1048576/1024` — двойное деление килобайт
+     (meminfo kB), печать «0.1 GiB» → исправлено на /1048576 → на
+     живую репетицию МЕСТО исправлено: «MemTotal: 122.7 GiB /
+     MemAvailable: 20.9 GiB» (печать, не гейт);
+   - **podman logs → STDERR (критический)**: `podman logs
+     hipfire_hipfire_1 2>/dev/null` на FAEX отдаёт ПУСТО (wc -l: 0 строк
+     stdout / 3396 строк stderr!) — ВСЕ считалки логов EXP-003 вернули
+     бы 0: P1.5 = ложный FAIL («lanes нет»), P4c/P7 = ложный PASS
+     («refused=0» при неразличимых логах). Исправлено: 8 мест —
+     `podman logs … 2>&1` (как `check_route` в lib/health.sh — там
+     сделано правильно с самого начала; EXP-001 evo — принят, на evo
+     окружение не проверялось, нулевой риск для него).
+4. Гигиена dry: `stat_set`-инициализация dry-состояния теперь только при
+   DRYRUN=1 (в real-режиме `$DRY_DIR` не создаётся и писание туда давало
+   бы permission-denied-шум в result.txt); dry-canned StartedAt приведён
+   к реалистичному многословному формату.
+
+**Живая репетиция (read-only, ssh bash -s, никаких записей/остановок).**
+P1+P1.5-ФРАГМЕНТ реального EXP-003 (срез строк 99..до-маркера-P2, реальный
+`remote()` → ssh; в payload нет ничего установочного — проверено grep'ом;
+`rm -rf` только в trap на несуществующий CLONE) ПРОВЕРЁН ЗАМЕТАНО:
+- P1 ЗЕЛЁНЫЙ: профиль flash-multi, health OK, md5 `cfba2fbf` (update не
+  начинался), state-замер `profiles/flash-multi` → `cfg=d2cd5ab8…`,
+  `du=34156456371 B`, `files=109` + top-листинг (session-cache 32 GiB,
+  cache/, registry.cache.json, serve.pid, daemon-pci-*.pid);
+  models-листинги (27b: mq6-xt уже на диске — докачка НЕ ожидаема;
+  flash: trunk 70.9 GB + 2 PLE — PLE-строк 2), df avail ~1.07 TiB,
+  контейнер «Up 24 hours (healthy)», StartedAt строкой целиком;
+- P1.5 ЗЕЛЁНЫЙ (после 2>&1): `count=1`, бейслайн-строка
+  `qwen4 fn-lanes staged: topology=single lanes=4 row_budget=4 spec=mtp
+  K=7 sampled=true policy=…` — фактический формат зафиксирован в отчёте;
+  с продуктовым `check_route` (grep `topology=[a-z]+ lanes=[0-9]+…`)
+  совместим — topology=single под паттерн попадает;
+- P2-StartedAt-фрагмент (read-only payload) — живо: StartedAt P2 ==
+  StartedAt P1 (строчное равенство), `lanes_p2=1` == бейслайн;
+- `qwen4 lanes refused`: 0 ✓; `/stats` healthy (894 served,
+  recent_tok_s 54.8 — не моего прогона, редкий живой трафик).
+
+**Валидация EXP-003 после правок**: `bash -n` rc=0; shellcheck —
+по-прежнему только SC2016×16; DRYRUN=1 ×4 варианта — все rc=0, RESULT:
+PASS, FAIL/ERROR=0, сети нет; proof `.dryrender.txt` перегенерирован
+(39 блоков, IP/ключей нет). Файл теперь 992 строки.
+
+**Регресс (round 3, продукт по-прежнему HEAD `7e912d5` = C1 + spec).**
+Полный внутренний набор неизменного продукта пере-прогнан в Round 1a/2
+(bash -n 12/12, golden 4×7 + stub-логи, cli_parity + usage-golden,
+pure_funcs + md5 фикстуры, install_sandbox, bench_py_parity, ttft_test,
+DoD-1 grep'ы, shellcheck-multiset == C1, «путь новичка») — продукт
+инвариантен (diff `4ad0519..HEAD -- . ':!spec'` = пусто), деградации нет.
+
+Вердикт (round 3): **BLOCKED-EXTERNAL** — StartedAt-парсер исправлен и
+проверен на ЖИВОМ многословном значении; два новых факта (stderr-логи
+podman, meminfo kB) закрыты; правило «парсируемые блоки репетировать
+live read-only» принято. Фактический полный прогон EXP-003 — по-прежнему
+у оркестратора (GO стоит; риск повторного P1-pадения снят: P1/P1.5/
+P2-StartedAt live-зелёные read-only) → DoD 11 → DoD 12 → reviewer → C2.
