@@ -495,3 +495,358 @@ Design, перечислены для прозрачности — переоп�
    что файл, который `cmd_bench` создаёт из `tpl/bench/` (c_code.txt),
    имеет md5 `253c7ac50857fe6d0e10fb0d2c5e35c0` (покрывает путь
    «heredoc → cat файла» на предмет trailing-newline).
+
+---
+
+## Dev report (developer)
+
+Date / round: 2026-11-10, round 1. Коммит C1: `4ad0519` (состав — строго
+по Design §5: `hfctl`, `lib/*.sh`×10, `tpl/**`, `install.sh`, `README.md`,
+`spec/hfctl.md` §2, `spec/plan.md`, `spec/state.md`; этот отчёт — артефакт
+роли, в коммит не вошёл).
+
+### What was done (по scope-пунктам)
+
+**Диспетчер `hfctl`** (1661 → 102 строк): `#!/usr/bin/env bash` (L1),
+usage-блок L2..20 (строки 3–7 обновлены под git-clone — единственное
+осознанное изменение текста usage, addendum #2; строки 8–20 — дословно),
+`set -euo pipefail`, env-конфигурация L34..L54 дословно + две новые
+строки `LIB_DIR`/`TPL_DIR` (без env-переопределений), хелперы
+`log`/`warn`/`die`/`ASSUME_YES`/`ask`/`isint`, 10 `source`'ов в целевом
+порядке, `usage()` (`sed -n '2,20p' "$0"`) и dispatch-блок дословно
+(текст «неизвестная команда» byte-в-byte).
+
+**`lib/*.sh`** — 10 модулей, по одной ответственности:
+- `lib/profiles.sh` (58 строк) — константы профилей, `profile_field`,
+  `resolve_profile`, `ram_pool_gib`, `profile_gate`, `profile_avail_list`;
+- `lib/stack.sh` (46) — `CF`, `compose`, `env_val`, `cur_profile`,
+  `cur_model`, `preflight`;
+- `lib/state.sh` (40) — `state_dir`, `migrate_state`, `model_set`,
+  `set_models_dir`, `migrate_models`;
+- `lib/stack_files.sh` (70) — `render_tpl` (чистый bash, `${var//lit/val}`,
+  die на остаточных `__X__`), `sync_tree` (маркер `$STACK_DIR/hfctl`;
+  отказ при неполном дереве — текст addendum #3), `ensure_symlink`,
+  `write_stack_files` (статичные compose — `install -m 0644` без
+  экспансий; compose.local.yml — render), `write_env` (через render);
+- `lib/engine.sh` (51) — `cfgset`, `apply_profile` («ВАЖНО»-комментарии
+  дословно);
+- `lib/health.sh` (64) — `wait_health` (→ `health_ok.py`), `smoke`
+  (→ `smoke_resp.py`), `check_route` (→ `health_mode.py`; «ВАЖНО»-
+  комментарии сохранены);
+- `lib/models.sh` (17) — `pull_model`, `pull_profile_models`;
+- `lib/commands.sh` (386) — `cmd_install/use/status/logs/watch/doctor/
+  models/pull/uninstall` + `gpu_temp`, `cmd_mode`;
+- `lib/autostart.sh` (85) — `cmd_on/off/up/down`, `cmd_autostart`
+  (юниты — render из tpl; timer — статичный `install -m 0644`),
+  `hf_up_locked`, `cmd_boot`, `cmd_watchdog`;
+- `lib/bench.sh` (402) — весь bench; `BENCH_FIXTURE_MD5`; фикстура
+  читается из `"$TPL_DIR/bench/merge_sort_thinking_off.txt"` (md5-гейт
+  и WARN сохранены); `bench_med` (→ `tpl/awk/bench_med.awk`), hol-note
+  (→ `tpl/awk/hol_note.awk`); `bench_write_py` УДАЛЁН.
+
+**`tpl/`** (все шаблоны, без исключений):
+- `compose/compose.yml` (54 строк) и `compose.halo.yml` (16) — статичные,
+  тела heredoc старого кода (L230–285 / L287–303) дословно;
+- `compose/compose.local.yml.tpl` — плейсхолдеры `__LOCAL_PROMPTS__`,
+  `__LOCAL_DRAFT_ENV__`;
+- `env/env.tpl` — `__PROFILE__ __MODEL__ __PORT__ __BIND__ __MODELS_DIR__
+  __STATE_DIR__ __IMAGE__`;
+- `systemd/` — 3 tpl (service — `__STACK_DIR__ __CF__ __PODMAN_BIN__`,
+  watchdog.service — `__STACK_DIR__`, timer — без плейсхолдеров);
+  «ВАЖНО: без KillMode=process…»-комментарий перенесён в watchdog tpl
+  дословно;
+- `python/` — 13 файлов по контрактам Design §4 (№1–14; №1/№2 — один
+  общий `health_ok.py`);
+- `awk/` — `bench_med.awk`, `hol_note.awk`;
+- `bench/merge_sort_thinking_off.txt` — shipped-копия, md5 = эталон.
+
+**`install.sh`** (66 → 69 строк): clone-only. `HFCTL_RAW_URL` и curl-ветка
+удалены; проверка дерева рядом с собой (нет `hfctl`+`lib/`+`tpl/`) → die
+с текстом addendum #3, rc 1; синхронизация ровно трёх элементов
+(`hfctl`+`lib/`+`tpl/`) с `rm -rf "${STACK_DIR:?}/…"` (защита от пустого
+STACK_DIR — SC2115); симлинк в bin (вкл. замена реального файла);
+PATH-подсказка; идемпотентен. `HFCTL_DIR`/`HFCTL_BIN_DIR` сохранены.
+Сопутствующее изменение (см. Known limitations): финальная строка
+«Обновление бинаря…» переписана под git-clone-механику.
+
+**README.md**: quickstart — только git clone (строка `curl -fsSL`
+удалена); «Как это устроено» — дерево `~/hipfire/` включает `hfctl`
+(диспетчер), `lib/`, `tpl/` + абзац про дистрибуцию/обновление.
+
+**spec**: `hfctl.md` §2 (hfctl НЕ однофайловый; дистрибуция = git clone;
+curl убран; install.sh-контракт), `plan.md` (этап 8 с DoD), `state.md`
+(строка этапа 8 «в работе» + строки 6/7 в таблице + журнал). В новых
+строках spec — 0 имён хостов (нейтральные «прод-машина (60 GiB)» /
+«вторая машина (128 GB)» — см. правило 7 ниже).
+
+**Поведение** — байт-в-байт, за двумя осознанными исключениями (usage
+L3–7, текст ошибки install.sh вне дерева) — подтверждено проверками ниже.
+
+### How it was checked internally (команды + результаты)
+
+Среда: dev-контейнер alpine-musl (bash 5.3.9, shellcheck 0.11.0, python3),
+без /dev/kfd/systemd/podman. Sandbox `$S=/tmp/hfctl-stage8` (см. Known
+limitations про путь). Harness-скрипты: `$S/test/*.sh` (тексты —
+`/tmp/hfctl-stage8/test/{golden_stack,cli_parity,pure_funcs,
+install_sandbox,bench_py_parity,ttft_test}.sh` + `fake_sse.py`;
+tester повторяет по тем же скриптам). Stubs `podman`/`systemctl`/
+`loginctl`/`sudo` — идентичные заглушки для обоих прогонов (лог вызовов
+— `$S/*/stub-*.log`).
+
+**DoD 1 — раскладка** (PASS):
+- `grep -c 'python3 -c' hfctl lib/*.sh` → все 0;
+- grep записи heredoc в compose/.env/.service/.timer → 0 (остатшиеся
+  `cat <<EOF` — только печать в stdout: `bench_help`, «как пользоваться»
+  в `cmd_install`, финальный блок install.sh);
+- `grep -rn 'FIXTURE_EOF' hfctl lib/` → 0;
+- `wc -l hfctl` = 102 (≤ 450);
+- «ВАЖНО»-комментарии: old 5 → new 5 (4 в shell-файлах + 1 в
+  `tpl/systemd/hipfire-compose-watchdog.service.tpl`), дословно.
+
+**DoD 2 — bash -n + shellcheck** (PASS, с задокументированными
+исключениями):
+- `bash -n` — OK для всех 12 shell-файлов (hfctl, lib/*.sh×10,
+  install.sh);
+- **baseline (зафиксирован до изменений; HEAD-версии)**:
+  `shellcheck <HEAD>hfctl <HEAD>install.sh` → rc=1; findings (без
+  footer-URL): SC2034×4 (profile_×3, retries), SC2155×3, SC1091×2
+  (`. /etc/os-release`), SC2005×1, SC2086×1, SC2012×1 — всего 12;
+- **after**: `shellcheck hfctl lib/*.sh install.sh` → rc=1; findings:
+  SC2034×21, SC1091×12, SC2155×3, SC2005×1, SC2086×1, SC2012×1 —
+  всего 39;
+- **новых КОДОВ нет** (multiset-сравнение: union кодов идентичен);
+- дельта **SC1091 +10** — все ровно на строках `source "$LIB_DIR/…"`
+  (динамический путь; ожидаемое исключение Design §6);
+- дельта **SC2034 +17** — все «appears unused» на ГЛОБАЛЬНЫХ
+  переменных, пересекающих границы модулей (shellcheck анализирует
+  файл в файл): IMAGE, MODELS_DIR, STATE_BASE, PORT, BIND, DRAFT_FILE,
+  SLOTS, CONTAINER, UNIT_NAME, STOP_MARKER, MAX_SEQ, MEMLOCK, TPL_DIR
+  (определены в диспетчере → используются в lib) + BIND (bench.sh),
+  SLOTS и ASSUME_YES (commands.sh), PROFILE_DEFAULT (profiles.sh) →
+  используются в других модулях. Использование доказано parity-прогонами
+  ниже (функции, где переменные участвуют, работают). По классу —
+  тот же cross-file-артефакт, что SC1091 (Design §6). Fix-идея — в
+  Out-of-scope proposals.
+
+**DoD 3 — golden-file parity** (PASS): `$S/test/golden_stack.sh old|new`:
+«функционная часть» (sed до инвариантного маркера `^cmd="\${1:-}"`)
+старого и нового; sandboxed HOME/HFCTL_DIR + stub'ы; 4 комбинации
+{27b-single (draft yes) × prompts есть/нет} ∪ {flash-multi (draft −) ×
+prompts есть/нет} → `write_stack_files; write_env <prof> <model>;
+cmd_autostart`. `cmp` попарно `compose.yml`, `compose.local.yml`,
+`compose.halo.yml`, `.env`, 3 systemd-юнита — **все идентичны**
+(единственный raw-разброс — вшитые sandbox-пути `…/old/` vs `…/new/`
+в `.env`/юнитах — артефакт harness; после нормализации пути diff =
+пусто); `grep -rlE '__[A-Z0-9_]+__'` по всему выводу = 0 (остаточных
+плейсхолдеров нет; die-guard render_tpl работает).
+
+**DoD 4 — CLI-поверхность** (PASS): `$S/test/cli_parity.sh`: свежий
+HFCTL_DIR + stub'ы; `{usage, неизвестная команда, status, status --json,
+doctor, models, bench --help}` — old vs new: **все выводы и rc
+идентичны** (кроме согласованного usage L3–7); `status --json` —
+валидный JSON (`json.tool`); NEW-golden usage закреплён в
+`$S/test/usage_new_golden.txt` и воспроизводится; old-vs-new diff usage
+= ровно строки 2..6 вывода (file L3..7), строки 7..19 (карта команд)
+byte-в-byte. Новый текст L3..7 (фиксируется):
+
+```
+Ubuntu/Debian. Раскладывается деревом: диспетчер hfctl + lib/*.sh + tpl/
+(шаблоны compose/.env/юнитов/python/фикстуры); запускается ОТ СВОЕГО ИМЕНИ
+(не root; sudo применяется точечно):
+  git clone <repo> && cd hfctl && ./install.sh   # бинарь в стек + симлинк в bin
+```
+
+**DoD 5 — чистые функции + md5** (PASS): `$S/test/pure_funcs.sh`:
+`profile_field` (3 профиля × поля 1–5), `resolve_profile` (все 10
+алиасов + неизвестный → rc=1), `model_set` (3), `profile_avail_list`
+(один /proc/meminfo), `bench_med` (9 сценариев × поля 1–6 на
+зафиксированном `$S/test/runs.tsv`) — old vs new: **все идентичны**
+(diff = пусто). `md5sum benchmarks/prompts/*.txt tpl/bench/*.txt` =
+`253c7ac50857fe6d0e10fb0d2c5e35c0` (обе копии); доп. (addendum #4):
+old-встроенная фикстура (heredoc `IFS='' read -r -d ''`) даёт тот же
+md5 → путь «heredoc → cp файла» байт-нейтрален (trailing-newline
+учтён).
+
+**DoD 6 — install.sh sandbox** (PASS): `$S/test/install_sandbox.sh`:
+(а) из дерева → все файлы `hfctl`/`lib/*`/`tpl/**` в стеке `cmp`-равны
+источнику, `readlink bin/hfctl` = путь в стек; (б) реальный файл в bin
+→ после повторного install.sh снова симлинк; (в) идемпотентность:
+повтор → rc 0, md5-снапшот идентичен; (г) вне дерева (install.sh один
+в каталоге) → rc 1 + «дерево hfctl неполное: рядом нет lib/ и tpl/ —
+установи через git clone + ./install.sh», стек НЕ создан; (д)
+`grep -cE 'HFCTL_RAW_URL|curl' install.sh` = 0.
+
+**DoD 7 — bench-python parity + ttft** (PASS): `$S/test/bench_py_parity.sh`:
+old `bench_write_py` (BENCH_TMP) извлёк ttft.py/bench_py.py; `ttft.py`
+old vs new — byte-в-byte; `report`/`artifact`/`compare` (единый env:
+B_RUNS=зафиксированный runs.tsv; B_TS/профиль/модель/роут/образ/md5 —
+константы; B_NOTE_* — константы; compare-base = артефакт) — stdout и
+stderr old `bench_py.py` vs new `bench_report.py` **идентичны**.
+`$S/test/ttft_test.sh` + `fake_sse.py` (http-сервер: /a — 2 дельты без
+content + пауза 150 мс + chunk с content + [DONE]; /b — только role-
+дельты; /c — закрытый порт): ttft.py → `162` (150 ≤ x < 2000 ✓),
+`null` ✓, `ERR <urlopen error [Errno 111] Connection refused>` ✓.
+
+**DoD 8 — README** (PASS): `grep -c 'curl -fsSL' README.md` = 0;
+раздел «Как это устроено» описывает `lib/` и `tpl/`.
+
+**DoD 9 — spec** (PASS по составу): правки §2/plan/state.md — в diff
+C1; содержание — на проверке reviewer'а.
+
+**Доп. sanity**: запуск диспетчера прямо из «стека» (SELF =
+`$STACK_DIR/hfctl`, early-return sync_tree) — `models` работает,
+неизвестная команда rc=1; source'ы lib под `set -u` без top-level-
+вызовов (все harness-прогоны source'ят модули и не падают до dispatch).
+
+**Правило 7 (grep перед коммитом)**: product surface
+(`hfctl`, `lib/`, `tpl/`, `install.sh`, `README.md`) — 0 имён хостов/IP/
+ключей/логов; в новых строках diff C1 — 0. В spec-документах имена
+машин есть и были ДО коммита (HEAD: plan.md 1, state.md 16, task-8.md 2
+— в brief'е orchestrator'а они в DoD 10–12); в добавляемых этим
+этапом строках — только нейтральные обозначения.
+
+### Not checked internally (что подтверждает внешний прогон)
+
+В контейнере нет /dev/kfd, systemd user, podman — **install и всё
+GPU/systemd-зависимое ВНУТРЕННЕ не проверяется** (внешние DoD 10–12,
+не моя зона — tester/orchestrator):
+- DoD 10 (прод-машина 60 GiB): обновление деревом через install.sh
+  поверх живого стека (models/state/конфиг целы), boot-юнит запускает
+  ДИСПЕТЧЕР из стека (`_boot` source'ит lib/), полный цикл use↔use
+  (27b-slots → 27b-single), off→on, ребут → сам подъём канона,
+  healthy+smoke;
+- DoD 11 (вторая машина 128 GB): обновление без остановки →
+  flash-multi healthy + smoke, lanes-роут не пострадал;
+- DoD 12: hflab AGENTS.md/STATE.md + `.local-analysis/`-артефакты.
+
+Не проверялось внутренне также: живые `wait_health`/`smoke`/
+`pull_profile_models`/`cfgset` (нужен реальный сервер), recreate-цикл,
+watchdog на живом rootless-podman.
+
+### Known limitations / assumptions
+
+1. **shellcheck cross-file (DoD 2)**: +10 SC1091 (source-строки) и
+   +17 SC2034 (глобальные переменные между модулями) — задокументиро-
+   ваны выше; новых КОДОВ нет; поведение не изменилось (parity-прогоны
+   зелёные). Это цена модульности, а не регресс.
+2. **Sandbox-путь**: Test strategy предписывает
+   `/tmp/opencode/hfctl-stage8/`, но `/tmp/opencode` в этом контейнере
+   root:root и недоступен на запись uid 1000 (без sudo) → использован
+   `/tmp/hfctl-stage8`. На результаты не влияет (все env-
+   переопределения HFCTL_DIR/HOME/PATH те же); tester повторяет по
+   тем же скриптам.
+3. **`$USER` в контейнере**: в harness-прогонах `export USER=hfctltest`
+   (в dev-контейнере переменная не задана, `set -u` упал бы на
+   `loginctl … "$USER"`); на реальных машинах USER всегда задан — на
+   парность не влияет (оба бинаря используют его одинаково).
+4. **install.sh финальная строка**: «Обновление бинаря: свежий клон
+   репозитория → тот же install.sh (стек и модели останутся)» —
+   сопутствующее изменение формулировки (было «повтори этот же
+   install.sh»); вышло за рамки двух заявленных исключений вывода —
+   фиксация для reviewer'а (смысл: curl-режима больше нет).
+5. **`rm -rf "${STACK_DIR:?}/…"`** в sync_tree/install.sh: при пустом
+   STACK_DIR — явная ошибка вместо `rm -rf /lib` (поведение меняется
+   только в невозможном на практике случае; SC2115 закрыт).
+6. **addendum #3** применён и к `sync_tree` (die при неполном дереве),
+   и к `install.sh` — единый текст.
+7. **Двойная копия фикстуры** (benchmarks/prompts канон + tpl/bench
+   shipped) — по решению (1a); рассинхронизация ловится md5-гейтом
+   DoD 5 и runtime-WARN в cmd_bench.
+
+### Out-of-scope proposals (идеи — сюда, не в код)
+
+- Для SC2034/SC1091 cross-file-шума — `shellcheck -x`/`--source=…` или
+  проектный `.shellcheckrc` с `exclude` для модулей; отдельным этапом
+  (сейчас не введено — Design не требует).
+- `benchmarks/prompts/` → `tpl/bench/`: генерация shipped-копии из
+  канона скриптом (убрать дублирование); сейчас обе копии + md5-гейт.
+- README «Как это устроено»: дерево `tpl/` списком — косметика.
+
+---
+
+## Test report (tester)
+
+Date / round: 2026-11-10, round 1. Verdict: **BLOCKED-EXTERNAL** — все
+внутренние проверки (DoD 1–9 + дополнительный регресс) зелёные; внешние
+DoD 10–11 ждут явного GO пользователя (машины в работе) — EXP-скрипты
+созданы, НЕ запускались; DoD 12 (hflab-документация) закрывается после
+внешней партии.
+
+### Internal checks
+
+| DoD item | проверка | результат |
+|---|---|---|
+| 1 раскладка | `grep -c 'python3 -c' hfctl lib/*.sh` → 0×11; heredoc/редиректы в `$STACK_DIR/{compose*,.env,*.service,*.timer}` → 0 (остатшиеся `cat <<EOF` — только stdout-печать: bench_help, install-подсказка, финальный блок install.sh); `grep -rn FIXTURE_EOF hfctl lib/` → 0; `wc -l hfctl` = 102 (≤450); «ВАЖНО» old 5 → new 5 (4 в shell + 1 в tpl) дословно | PASS |
+| 2 bash -n + shellcheck | `bash -n` всех 12 shell-файлов (hfctl, install.sh, lib/*.sh) → rc=0; shellcheck baseline **пересобран из git 3eb7ce7** = 12 findings (SC2034×4, SC2155×3, SC1091×2, SC2005×1, SC2086×1, SC2012×1) — совпадает с dev-report; after = 39 (SC2034×21, SC1091×12, SC2155×3, SC2005×1, SC2086×1, SC2012×1); **новых КОДОВ нет**; дельта SC1091 +10 — ровно на строках `source "$LIB_DIR/…"`; дельта SC2034 +17 — ровно на перечисленных в dev-report cross-module-глобальных (ASSUME_YES, BIND×2, CONTAINER, DRAFT_FILE, IMAGE, MAX_SEQ, MEMLOCK, MODELS_DIR, PORT, PROFILE_DEFAULT, SLOTS×2, STATE_BASE, STOP_MARKER, TPL_DIR, UNIT_NAME) | PASS |
+| 3 golden-file parity | `golden_stack.sh old/new` пере-запущены: 4 комбинации (draft ×/- × prompts ×/-) × {compose.yml, compose.halo.yml, compose.local.yml, .env, 3 systemd-юнита} — `cmp` после нормализации sandbox-путей = идентичны; stub-логи (вызовы podman/systemctl/loginctl) идентичны; остаточные `__X__` = 0 | PASS |
+| 4 CLI-поверхность | `cli_parity.sh`: usage / неизвестная команда / status / status --json (валидный JSON, `json.tool`) / doctor / models / bench --help — выводы и rc идентичны (кроме согласованного usage L3–7: diff = ровно 4+4 строки, текст зафиксирован в dev-report и воспроизводится из репо; NEW-golden сверен с `bash hfctl` из `/workspace/hfctl`) | PASS |
+| 5 чистые функции + md5 | `pure_funcs.sh`: `profile_field` (3×5), `resolve_profile` (10 алиасов + неизвестный rc=1), `model_set` (3), `profile_avail_list`, `bench_med` (9 сценариев × 6 полей, зафиксированный runs.tsv) — old vs new идентичны; md5 фикстур = `253c7ac50857fe6d0e10fb0d2c5e35c0` (benchmarks/prompts + tpl/bench); old-встроенная heredoc-фикстура — тот же md5 | PASS |
+| 6 install.sh | `install_sandbox.sh`: (а) все файлы `cmp`-равны дереву, `readlink` = путь в стек; (б) реальный файл → снова симлинк; (в) идемпотентен (md5-снапшот); (г) вне дерева rc=1 + «дерево hfctl неполное…» + стек НЕ создан; (д) `grep -cE 'HFCTL_RAW_URL\|curl' install.sh` = 0 | PASS |
+| 7 bench-python + ttft | `bench_py_parity.sh`: old `ttft.py` = new байт-в-байт; report/artifact/compare — stdout+stderr идентичны (единый env, зафиксированный runs.tsv); `ttft_test.sh` (fake-SSE): `/a` → `161` (∈ [150,2000)), `/b` → `null`, `/c` → `ERR <urlopen error [Errno 111] Connection refused>` | PASS |
+| 8 README | `grep -c 'curl -fsSL' README.md` = 0; «Как это устроено» — дерево с `hfctl` (диспетчер), `lib/`, `tpl/`; quickstart = git clone | PASS |
+| 9 spec | в diff C1: `spec/hfctl.md` §2, `spec/plan.md` (этап 8), `spec/state.md` (строка этапа 8 «в работе» + журнал) — состав подтверждён; содержание — зона reviewer'а | PASS (по составу) |
+
+### Дополнительный регресс (добавлен tester'ом, developer не заявлял)
+
+| проверка | результат |
+|---|---|
+| «свежий clone» (путь новичка): `git clone /workspace/hfctl → clone-fresh` (HEAD = C1, чистое дерево) → `./install.sh` с sandbox `HOME/HFCTL_DIR/HFCTL_BIN_DIR`: rc=0; все файлы стека `cmp`-равны клону; симлинк в стек; запуск диспетчера ИЗ стека (early-return `sync_tree`): `models` rc=0, usage rc=0, неизвестная команда rc=1 | PASS |
+| `bash -n` на ВСЕХ shell-файлах (hfctl, install.sh, lib/*.sh — 12 шт.) | PASS (rc=0) |
+| правило 7 — независимый grep по **новым строкам** C1 (`git show 4ad0519`, `+`-строки): IP — только `127.0.0.1` / `${HIPFIRE_BIND:-127.0.0.1}` (localhost, не машины); имена хостов — только «Halo / Strix Halo» (платформа AMD, предсуществующая практика, в т.ч. в pre-C1 hfctl) и имя файла `compose.halo.yml`; пути ключей / ssh-команды с адресами / user@host — **0**; в spec-файлах — **0** (имена машин в spec — докоммитная практика, C1 новых не вводит) | PASS |
+| «падает как надо» (action recipe): `hfctl use nosuch` → «неизвестный профиль … (доступны: …)» rc=1; `hfctl install --bogus` → «неизвестный флаг … (доступны: …)» rc=1; `hfctl use` → «использование: hfctl use <profile> (…);» rc=1; install.sh вне дерева → «дерево hfctl неполное: … git clone + ./install.sh» rc=1, стек не создан | PASS |
+
+### Сверка Dev report с фактами (пункт B)
+
+- Все заявленные PASS (DoD 1–8) воспроизведены по harness-скриптам
+  developer'а (`/tmp/hfctl-stage8/test/`): golden, cli_parity, pure_funcs,
+  install_sandbox, bench_py_parity, ttft_test — все зелёные.
+- Числа DoD 2 совпадают строго (baseline 12 / after 39 / нет новых кодов).
+  Первое расхождение в подсчётах — артефакт footer-URL'ов shellcheck
+  (содержат SC-коды), не findings; с учётом этого — полное совпадение.
+- Отклонение «sandbox-путь `/tmp/hfctl-stage8` вместо
+  `/tmp/opencode/hfctl-stage8`» — **обосновано**: `/tmp/opencode` =
+  root:root, uid 1000 не пишет (проверено: `touch` → Permission denied),
+  sudo запрещён. На результаты не влияет (env-переопределения те же).
+- Отклонение limitation #4 (финальная строка install.sh переписана под
+  git-clone-механику) — подтверждена в коде; честно задекларирована в
+  dev-report; не противоречит цели (curl-режим удалён), но формально
+  выходит за два заявленных исключения вывода — **примечание для
+  reviewer'а**, не FAIL.
+- Отклонение limitation #1 (shellcheck cross-file +10/+17) —
+  обосновано Design §6; дельты локализованы (проверено).
+- Мелочи (не дефекты): ttft `/a` = 161 мс в моём прогоне (у developer'а
+  162) — джиттер в допустимом диапазоне; точные количества имён машин в
+  spec-доках до коммита зависят от grep-паттерна (dev-report:
+  plan.md 1 / state.md 16 / task-8.md 2; мой подсчёт: 1 / 14 / 3,
+  hfctl.md 2) — сущность (имена — докоммитные, C1 новых не вводит)
+  подтверждена независимым grep.
+
+### Failures (FAIL)
+
+Нет.
+
+### External experiments
+
+| EXP-id | DoD item | статус |
+|---|---|---|
+| `EXP-001-evo-full.sh` — hflab `.local-analysis/task8-exp/` (полный цикл: pre → update деревом → use 27b-slots → use 27b-single → off → on → reboot → сам подъём канона + smoke → финал 27b-single) | 10 | создан, **НЕ запускался** — ожидает GO пользователя (машина в работе); `bash -n` + dry-render динамических remote-блоков — ок |
+| `EXP-002-faex-light.sh` — там же (update деревом без остановки → healthy + smoke, lanes-лог info) | 11 | создан, **НЕ запускался** — ожидает GO; `bash -n` + dry-render — ок |
+| — (документация, без скрипта) | 12 | закрывается после внешней партии: hflab AGENTS.md (hfctl-секция: дерево `~/hipfire/`, дистрибуция git clone, update = install.sh из клона) + STATE.md hflab; артефакты приёмки — `.local-analysis/task8-exp/*.result.txt` |
+
+Запуск EXP — только после предупреждения пользователя и его GO
+(шапки скриптов это фиксируют; профиль/модель/порт читаются из
+`hfctl status --json` — не хардкодятся; SKIP-флаги на случай
+недоступного `sudo -n`).
+
+### Regression
+
+- Свит этапа 8 (harness developer'а + повторный прогон tester'ом +
+  добавленный регресс выше): **полностью зелёно** (таблицы выше).
+- Инварианты закрытых этапов: md5 bench-фикстуры = эталон (обе копии +
+  old-встроенная); порядок recreate → wait_health → smoke и exit-коды
+  `use`/`off`/`on` — пути кода не менялись (C1 — чистый рефакторинг;
+  parity DoD 3–5); state-лейаут per-профиль (этап 7) — `state_dir` /
+  `migrate_state` / `model_set` покрыты parity DoD 5.
+- Sandbox developer'а заснапшотирован в `/tmp/hfctl-stage8-devsnap`
+  ПЕРЕД повторными прогонами (форензика); прогоны tester'а — поверх тех
+  же скриптов.
