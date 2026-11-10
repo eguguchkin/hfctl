@@ -850,3 +850,63 @@ DoD 10–11 ждут явного GO пользователя (машины в �
 - Sandbox developer'а заснапшотирован в `/tmp/hfctl-stage8-devsnap`
   ПЕРЕД повторными прогонами (форензика); прогоны tester'а — поверх тех
   же скриптов.
+
+### Round 1 (2026-11-10): fix-раунд по тесту (triage: `test` — дефект
+harness'а tester'а; продукт НЕ менялся — HEAD `92920d5`,
+`git diff 4ad0519..HEAD` = только `spec/task-8.md`; `$S/tree` = HEAD
+bayt-в-байт по всем продуктовым файлам)
+
+**Разбор FAIL'а EXP-001 (P6).** Пользователь дал GO на che-evo; EXP-001
+отработал: P1–P5 зелёные (update деревом md5 `cfba2fbf → cd623950`,
+use↔use 27b-slots/27b-single, off/on), P6 формально FAIL: «канон не
+healthy в течение 15 мин после ребута». Причина — баг HARNESS'а
+tester'а, не продукта: в цикле ожидания P6 (EXP-001 строка ~187)
+`health_of` вызывался через пайп (`| health_of`) при аргументной
+сигнатуре (`$1`) и `set -u` → `line 78: $1: unbound variable` → каждый
+тик «ERR» → таймаут 15 мин. Remote-команда на каждом тике
+(`hfctl status --json`) выполнялась штатно — баг был в парсинге ответа
+tester'ом. Живая проверка оркестратора сразу после ребута подтвердила:
+контейнер Up (healthy) с момента boot, boot-юнит `hfctl _boot` = exit 0,
+дерево в стеке, профиль 27b-single, health ok → **P6 по существу
+состоялся**.
+
+**Исправление (только дефектное место).** EXP-001-evo-full.sh, цикл P6:
+аргументная форма — `st=$(remote …); h=$(health_of "$st") || h="ERR"`.
+Все остальные вызовы `health_of` сверены: EXP-001 — 6, EXP-002 — 3,
+все аргументные; пройденные шаги не переписывались. `bash -n` — чисто;
+pipe-вызовов `| health_of` в обоих EXP не осталось.
+
+**Новые доказательства DoD 10 (ДОП-прогон, read-only + 1 smoke-запрос,
+FAEX не трогался).** `EXP-001r1-verify.sh` →
+`.local-analysis/task8-exp/EXP-001r1-verify.result.txt` (hflab),
+**RESULT: PASS**:
+- V1: `status --json` → профиль **27b-single**, модель
+  `qwen3.8:27b-mq4-xts`, health **OK** (mode standard, multi_slot=false);
+  порт из `.env` = 11435;
+- V2: контейнер `hipfire_hipfire_1: Up 27 minutes (healthy)`; boot-время
+  хоста (uptime -s) 17:22:27 MSK; дерево в стеке: `lib/` = 10 модулей,
+  `tpl/` = 6 подкаталогов; симлинк `~/.local/bin/hfctl` →
+  `/home/hipfire/hipfire/hfctl`;
+- V3: boot-юнит `hipfire-compose` — **active (exited)** с 17:22:35 (8 с
+  после boot), `ExecStart=bash /home/hipfire/hipfire/hfctl _boot
+  (code=exited, status=0/SUCCESS)` — boot-юнит запускает ДИСПЕТЧЕР из
+  стека (proof: дерево работает в прод-потоке);
+- V4: smoke — один запрос → content «OK» (ttft 266 мс, prefill
+  63.9 tok/s).
+
+**Пересчёт вердикта.** DoD 10 — **ЗАКРЫТ** (P1–P5 — исходный прогон
+EXP-001, P6/P7 — доп-доказательства `EXP-001r1-verify`): update
+деревом на живой машине, полный цикл use↔use/off/on, reboot → сам
+подъём канона (boot-юнит `hfctl _boot` exit 0), healthy + smoke, финал
+27b-single healthy. DoD 11 — по-прежнему **ждёт GO пользователя на
+FAEX** (EXP-002 готов, не запускался). DoD 12 — закроется при закрытии
+этапа (hflab AGENTS.md/STATE.md + артефакты в `.local-analysis/`).
+
+**Регресс (повтор, round 1).** Внутренний регресс пере-прогнан поверх
+неизменного продукта (HEAD 92920d5): golden (4 комбинации × 7 файлов,
+0 остаточных плейсхолдеров), cli_parity, pure_funcs (+md5 эталон),
+install_sandbox, bench_py_parity, ttft_test, `bash -n` 12/12, DoD-1 grep
+(`python3 -c`=0, FIXTURE_EOF=0, `hfctl`=102 строки) — **всё зелёно**.
+
+Verdict (round 1): **BLOCKED-EXTERNAL** (сузилось: остаётся только
+EXP-002/FAEX по DoD 11 + hflab-доки по DoD 12).
