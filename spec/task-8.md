@@ -910,3 +910,130 @@ install_sandbox, bench_py_parity, ttft_test, `bash -n` 12/12, DoD-1 grep
 
 Verdict (round 1): **BLOCKED-EXTERNAL** (сузилось: остаётся только
 EXP-002/FAEX по DoD 11 + hflab-доки по DoD 12).
+
+### Round 1a (2026-11-10, до GO): пере-проверка EXP-003-faex-full.sh — носитель
+DoD 11 в РАСШИРЕННОЙ постановке (решение пользователя: полный цикл вместо
+лёгкого EXP-002; EXP-002 — запасной). Продукт НЕ менялся: `git status`
+чисто, HEAD `3578c5c`, `git diff 4ad0519..HEAD -- . ':!spec'` = пусто,
+md5 диспетчера = `cd623950` (совпадает с `git show origin/main:hfctl` —
+локальный main ahead 2 — только spec-коммиты 12e9cf5/3578c5c).
+
+**Внутренние проверки EXP-003** (hflab `.local-analysis/task8-exp/`, 930
+строк; реальный прогон НЕ выполнялся — запуски только DRYRUN, сеть не
+трогалась):
+
+| проверка | результат |
+|---|---|
+| сценарная сборка: шапка ЦЕЛЬ/ПРЕДРЕКВИЗИТ/ЗАПУСК/ЧТО=PASS; шаги P1/P1.5/P2/P3(P3a–P3e)/P4(P4a–P4d)/P5(P5a–P5e)/P6(gated)/P7; финальная `RESULT: …`; SKIP-флаги SKIP_OFFON/SKIP_REBOOT + HAVE_REBOOT_BOOT; DRYRUN с graceful-fallback DRY_DIR | OK |
+| `bash -n EXP-003-faex-full.sh` | rc=0 |
+| shellcheck (без SC1091) | только SC2016×16 — все «\$expansion → remote-пейлоад» (единый стиль quoted-remote EXP-001; ожидаемое исключение) |
+| `DRYRUN=1` без ребута | rc=0, `RESULT: PASS`, no-reboot-финал «P6 SKIP», 38 rendered-блоков, bash -n каждого |
+| `DRYRUN=1 HAVE_REBOOT_BOOT=1` | rc=0, `RESULT: PASS`, «с ребутом», 41 блок (реальный reboot в dry не выполняется — дословно «пропускаю») |
+| `DRYRUN=1 SKIP_OFFON=1` / `SKIP_REBOOT=1` | rc=0 / rc=0, ветки проходят |
+| proof `EXP-003-faex-full.dryrender.txt` | перегенерация из текущего скрипта — идентичен уже хранимому; 38 блоков; `RESULT: PASS` |
+| dry не делает сеть | `grep 'ssh -i'` в dry-прогоне = 0; remote() в dry пишет только rendered-пейлоады + parsed canned-ответы (file-based state: profile/stop/m5n/bootn — переживает `$()`) |
+| урок EXP-001 fix-r1 | pipeline-вызовов `health_of` = 0 во всех EXP; все вызовы аргументные (`&& аргумент || ERR`); `set -u` сверху; шаг-функция `step()` |
+| «падает как надо» | каждый FAIL-эмит несёт action-recipe (P1 профиль≠flash-multi → «приведи машину к канону»; P1.5 нет lanes → «hfctl logs -n 50, приложи хвост»; P4c refused≠0 → «приклади logs+grep refused»; P6 не healthy → «systemctl status/journalctl»; P5 sudo-нет → ручной off/on + перезапуск с SKIP_OFFON=1; ERROR-ветки rc=2) |
+| гигиена | trap удаляет CLONE + DRY_DIR; хост-артефакты только клон `/tmp/hfctl-stage8-faex-full` (удаляется) и /tmp-логи use (удаляются сразу); gufo не трогается (в remote-пейлоадах упоминаний нет); MemAvailable печатается и не гейтится; диск-гейт (mq6-xt докачка нужна и <25G) — по делу |
+| грамматы assert'ов против кода C1 | `cfgset serve.batch_nonexact false` — engine.sh:20/33 ✓; `SMOKE: OK` — health.sh:36 ✓; `профиль X активен` — commands.sh:120 ✓; `singleton+DFlash` (check_route 27b-router) и `lanes ОТКАЗАНЫ`/`fn-lanes staged` — health.sh:54/61/46 ✓ (`grep -q` по подстрокам согласован с форматами вывода) |
+| секреты/IP в EXP-003 | IP/ключ/юзер есть — ШТАТНО: lab-артефакт в hflab (правило 7 — только для hfctl-репо), как и в EXP-001; в proof-файлах (dryrender, result) IP/ключей НЕТ |
+
+**Регресс (пере-прогон, round 2, продукт HEAD `3578c5c` = C1 + spec).**
+Harness `/tmp/hfctl-stage8/test/`, tree-снапшот refreshён с HEAD (md5-агрегат
+подтверждён; product-часть = C1 байт-в-байт; funcs.sh (срез диспетчера до
+`cmd=`) regenerated — байт-в-байт с снапшотом C1):
+
+| проверка | результат |
+|---|---|
+| `bash -n` hfctl/install.sh/lib×10 (12 файлов) | OK |
+| golden_stack old + new, 4 комбо × {compose.yml, compose.halo.yml, compose.local.yml, `.env`, 3 юнита} + stub-логи (нормализация sandbox-путей) | diff = 0, плейсхолдер-residue = 0 |
+| cli_parity old vs new (usage/неизвестная/status/--json/doctor/models/bench --help) | PASS; usage == NEW-golden для HEAD |
+| pure_funcs (profile_field/resolve_profile/model_set/profile_avail_list/bench_med); md5 фикстур benchmarks/prompts + tpl/bench + old-встроенная = `253c7ac50857fe6d0e10fb0d2c5e35c0` ×3 | PASS |
+| install_sandbox (из дерева/замена файла/идемпотентность/вне дерева/no-curl) | PASS |
+| bench_py_parity (report/artifact/compare) | PASS |
+| ttft_test (fake-SSE: 162 / null / ERR) | PASS |
+| DoD-1 grep (`python3 -c`=0×11, FIXTURE_EOF=0, `hfctl`=102) | PASS |
+| shellcheck C1-multiset: SC2034×21, SC1091×12, SC2155×3, SC2005×1, SC2086×1, SC2012×1 (footer-URL отфильтрованы) — **идентичен** C1 | PASS |
+| «путь новичка»: git clone HEAD → install.sh (sandbox HOME/HFCTL_DIR/BIN + stub) → стек cmp-равен клону, симлинк, диспетчер из стека (`models` rc=0, неизвестное rc=1, usage) | PASS |
+| правило 7 | продуктовая поверхность + `git show 4ad0519` «+»-строки: 0 IP/ключей/хостов (в tpl только `${HIPFIRE_BIND:-127.0.0.1}` и localhost-curl healthcheck — предсуществующая практика) |
+
+**Сверка ожидания md5.** `git show origin/main:hfctl | md5sum` = `cd623950…`
+— EXPECT_MD5-справка скрипта соответствует текущему GitHub main
+(клон EXP-003 тянет origin, НЕ локальный HEAD — поэтому ahead-2-spec-коммиты
+на прогон не влияют; их публикация оркестратором — до закрытия этапа,
+только после реального прогона).
+
+**Failures (FAIL)** — нет.
+
+Вердикт (round 2): **BLOCKED-EXTERNAL** — EXP-003 полностью проверен и
+готов (dry-render-режимы зелёные в обоих вариантах proof); реальный прогон
+на che-FAEX1 — после GO (машина свободна с 2026-11-10; CLONE Wi-Fi
+докачка mq6-xt ~21 GB учтена в скрипте: ~20–25 мин, общий прогон ≤ ~90
+мин). EXP-002 остаётся запасным лёгким вариантом (готов, не запускался).
+Закрытие: реальный прогон EXP-003 → result-proof → DoD 11 закрыт → DoD 12
+(hflab AGENTS.md/STATE.md) → reviewer → C2 «принят».
+### Round 2 (2026-11-10, вечер): fix-раунд по тесту EXP-003 (triage: `test` —
+дефект HARNESS'а tester'а, продукт не менялся и машина не менялась:
+live-проверка FAEX — сервер `Up 24 hours (healthy)`, update не начинался).
+
+**Разбор дефекта (расчёт пути для раскладки этапа 7).** P1-бейслайн EXP-003
+искал `$HOME/hipfire/profiles/flash/config/config.toml` — ХАРДКОД-имя `flash`.
+Фактический лейаут (live, read-only): маунты `<state>/config →
+/home/hipfire/.hipfire`, `<state>/kernel → /var/cache/hipfire`; канонический
+каталог — `$HOME/hipfire/profiles/flash-multi/` (только он в `profiles/`);
+инвентарь config/: `cache/` (2.6K verified-artifacts.json), `config.toml`,
+`daemon-pci-*.pid`, `models` (вложенный bind сета, 0 B), `registry.cache.json`
+(~109K), `serve.pid`, `session-cache/` (34 156 343 808 B = 32 GiB, ~106
+.snap), рядом `kernel/gfx1151`. Противоречило и моему же обещанию «не
+хардкодить» (профиль/модель/порт уже читаются из status). Ревизия
+EXP-001/001r1/002: хардкодов profile-dir/session-cache НЕТ (grep = 0) — они
+приняты (закрыты на evo), не тронуты (mtimes прежние).
+
+**Исправление (EXP-003, только дефектное место; product — не тронут).**
+1. `flash_profile="$profile"` сразу после разбора `status --json` в P1;
+   все state-пути теперь `$HOME/hipfire/profiles/$flash_profile/…`.
+2. Единый замер (`flash_state_monitor`/`probe_state`, используется в P1,
+   P3c, P4c, P7): `cfg=<md5 config.toml>`, `du=<du -sb $STATE/config
+   --exclude=models>`, `files=<find … -name models -prune -o -type f | wc>`,
+   плюс наблюдаемость: state_dir, листинг profiles при отсутствии config.toml,
+   построчные `top=<du><TAB><имя>` для каждого топ-уровневого entry (БЕЗ
+   привязки к имени каталога кэша — orchestrator-момент «под flash виден
+   cache/» учтён: замер глобальный, имя каталога НЕ сравнивается).
+3. Критерии сравнения: `config.toml` — строго байт-в-байт (это
+   per-профильный конфиг, движок его не ротирует); du/files — ГЛОБАЛЬНО с
+   толерантностью ≥½ бейслайна: disk-тир ЛЕГИТИМНО ротируется движком
+   (.snap TTL/вытеснение при 32 GiB cap — byte-монотонность создало бы
+   ложный FAIL), а wipe-поцарапан даст обвал много больше половины.
+   ps: `du --exclude=models` обязательно — models это вложенный bind сета
+   (~70–100 GB), его активная сторона меняется при use.
+4. Косметика консистентности: dry-canned (Mounts `profiles/flash-multi`,
+   замер-ответ cfg/du/files/top по живым цифрам FAEX), шапка и RESULT-строка
+   («session-cache» → «disk-тир …profiles/<profile>»).
+
+**Валидация.** `bash -n` rc=0; shellcheck — только ожидаемые SC2016×16
+(quoted-remote стиль); DRYRUN=1 в вариантах {базовый, `HAVE_REBOOT_BOOT=1`,
+`HAVE_REBOOT_BOOT=1 SKIP_REBOOT=1`, `SKIP_OFFON=1`} — все rc=0,
+`RESULT: PASS`, сеть не трогается (ssh-grep=0), FAIL/ERROR=0; proof
+`EXP-003-faex-full.dryrender.txt` перегенерирован (39 rendered-блоков;
+IP/ключей нет). **Живая read-only репл на FAEX ДЛЯ ВАЛИДАЦИИ ФИКСА**
+(запускался только сам замерный payload, ничего не пишет/не
+останавливает; сервер Up 24h healthy): вернул
+`state_dir=/home/hipfire/hipfire/profiles/flash-multi`,
+`cfg=d2cd5ab80bad9003d36342275e37b8c3`, `du=34156456371`,
+`files=109` + top-листинг из РЕАЛЬНОГО каталога — путь и цифры корректны
+(md5 = живому статусу, session-cache 32 GiB виден).
+
+**Регресс (round 2-фикс, продукт по-прежнему HEAD `3578c5c` = C1+spec).**
+Полный внутренний регресс пере-прогнан при round 1a (несколько часов
+раньше) поверх того же не менявшегося продукта — здесь повторно: bash -n
+12/12, golden old+new + stub-логи diff=0, cli_parity + usage-golden,
+pure_funcs + md5 фикстуры `253c7ac5…`, install_sandbox, bench_py_parity,
+ttft_test, DoD-1 grep'ы, shellcheck-multiset == C1, «путь новичка»
+(clone→install.sh→диспетчер из стека) — всё зелёно (детали — секция
+Round 1a).
+
+Вердикт (round 2): **BLOCKED-EXTERNAL** — EXP-003 исправлен, dry-режимы
+зелёные, замер валидирован live read-only реплой. Реальный прогон полным
+циклом — при GO (у пользователя уже стоит; машина свободна; E2E до ~90 мин
+с учётом mq6-xt докачки ~21 GB). По-прежнему остаётся только фактический
+прогон → result-proof → закрытие DoD 11 → DoD 12 → reviewer → C2.
