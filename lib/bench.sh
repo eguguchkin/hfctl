@@ -487,8 +487,8 @@ bench_hol() {
 #     база будущих --compare; копирование фикстуры tpl/bench в c_code.txt
 #     (байты-в-байты, md5-гейт — warn при несовпадении, НЕ die) и трёх
 #     ad-hoc промптов (prose/ttft/long/warm); чтение .env через env_val
-#     (HIPFIRE_PORT/HIPFIRE_BIND переопределяют глобалы PORT/BIND,
-#     HIPFIRE_IMAGE уходит в артефакт).
+#     (HIPFIRE_PORT переопределяет глобал PORT, HIPFIRE_IMAGE уходит в
+#     артефакт).
 #   Сеть/сервер: РЕАЛЬНЫЕ генерации — прогрев + (quick) 2×RUNS генераций и
 #     RUNS стримингов; (full) ещё RUNS×(prefill ~100K токенов, long-gen
 #     4096 токенов, параллельные 2+4 за батч, HOL-пары); GET /health +
@@ -540,7 +540,6 @@ cmd_bench() {
   [ -f "$STACK_DIR/.env" ] || die "стек не установлен — сначала 'hfctl install'"
   local v
   v=$(env_val HIPFIRE_PORT); [ -n "$v" ] && PORT="$v"
-  v=$(env_val HIPFIRE_BIND); [ -n "$v" ] && BIND="$v"
 
   # --json: человеческий вывод уходит в stderr, артефакт печатается в конце
   # в ИСХОДНЫЙ stdout (fd 4) — можно piping'нуть в jq.

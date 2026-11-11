@@ -283,13 +283,15 @@ gpu_temp() {
 #   обе формы: --interval N и --interval=N. Локалы: interval — целые
 #   секунды (default 2); now/last_print/last_down — unix-время (last_down
 #   -999 = сервер ещё не «падал»); q/served/recent/retries/cache/fails и
-#   prev_* — числа строками либо '-'/'' когда данных нет; prev_* при
+#   prev_* — числа строками либо '-'/'' когда данных нет; retries печатается
+#   в строку («│ ретраи: N») только при целом ≠0 (transient-ретраи движка
+#   нигде больше не видны); prev_* при
 #   недоступности сервера сбрасываются в '' (после поднятия печатается
 #   свежая строка без ложных дельт). read из python заглушён `|| true`:
 #   при пустом выводе счётчики остаются '-'.
 #
 # @param 1..N: string[] # флаги: --interval N | --interval=N (default 2 с, целое ≥ 1)
-# @stdout string        # строки событий (очередь/обслужено/кэш/done tok-s/ошибки/GPU) и heartbeat простоя
+# @stdout string        # строки событий (очередь/обслужено/кэш/done tok-s/ошибки/ретраи/GPU) и heartbeat простоя
 # @returns integer      # не возвращается — вечный цикл; ошибки аргументов: die (exit 1)
 cmd_watch() {
   # Философия тихого стриминга: строка только на ИЗМЕНЕНИИ видимых счётчиков,
@@ -350,6 +352,9 @@ cmd_watch() {
       fi
       line+=" │ done: $recent tok/s"
       if isint "$fails" && [ "$fails" -gt 0 ]; then line+=" │ ошибки: $fails"; fi
+      # transient-ретраи движка (/stats retries_attempted) — видны только тут;
+      # «-» (нет данных) не печатается: isint отсекает не-целое
+      if isint "$retries" && [ "$retries" -ne 0 ]; then line+=" │ ретраи: $retries"; fi
       if [ -n "$temp" ]; then line+=" │ GPU: ${temp}°C"; else line+=" │ GPU: ?"; fi
       echo "$line"
       last_print=$now
