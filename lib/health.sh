@@ -76,45 +76,74 @@ smoke() {
   echo "SMOKE: OK"
 }
 
+# Назначение: единый снимок фактического роута («фактический роут» модуля):
+#   один раз тянет хвост логов контейнера и извлекает движковые предикаты
+#   (lanes staged / lanes refused / spec) + health-режим слотов — из него
+#   питаются и check_route, и bench_route (критерии больше не расходятся:
+#   кто последний сказал в логах, тот и роут).
+#
+# Побочные эффекты: подпроцессы podman logs (--tail 400, stderr слит в
+#   stdout), curl GET /health (5 с) + python3 health_mode.py; ПИШЕТ глобалы
+#   ROUTE_LOG/ROUTE_STAGED/ROUTE_REFUSED/ROUTE_SPEC/ROUTE_HEALTH; в stdout не
+#   печатает.
+#
+# Ограничения/допущения: требует глобалы CONTAINER, PORT, TPL_DIR
+#   (диспетчер). Глобалы (строки; '' = совпадения нет; ROUTE_HEALTH при
+#   недоступном/нераспознанном /health = '?'): ROUTE_LOG — хвост логов,
+#   ROUTE_STAGED/ROUTE_REFUSED/ROUTE_SPEC — последнее совпадение шаблона
+#   (tail -1). Шаблоны grep — шесть принятых движковых швов (переехали
+#   дословно из check_route/bench_route), тексты движка правятся здесь, а не
+#   «чинятся». «|| true» при grep обязателен под set -e+pipefail: отсутствие
+#   совпадения — норма (lanes приняты → refused нет; serial → staged нет).
+#
+# @returns integer # всегда 0 — отказы заглушены; пустые поля снимка — норма
+route_snapshot() {
+  ROUTE_LOG=$(podman logs --tail 400 "$CONTAINER" 2>&1 || true)
+  ROUTE_STAGED=$(printf '%s' "$ROUTE_LOG" \
+    | grep -oE "fn-lanes staged: topology=[a-z]+ lanes=[0-9]+[^\"]*spec=[a-z0-9]+" | tail -1) || true
+  ROUTE_REFUSED=$(printf '%s' "$ROUTE_LOG" \
+    | grep -oE "qwen4 lanes refused:[^-—]*" | tail -1) || true
+  ROUTE_SPEC=$(printf '%s' "$ROUTE_LOG" \
+    | grep -oE "spec: [a-z0-9 ]+" | tail -1 | head -c 60) || true
+  ROUTE_HEALTH=$(curl -fsS -m 5 "http://127.0.0.1:$PORT/health" 2>/dev/null \
+    | python3 "$TPL_DIR/python/health_mode.py" 2>/dev/null || echo '?')
+  return 0
+}
+
 # Назначение: показать фактический роут профиля (spec §7): движок может
 #   вежливо деградировать (vmm lanes refused → serial) — показываем реальность.
-#   Источники: логи (fn-lanes staged / lanes refused — авторитетно) + health.
+#   Источники — общий снимок route_snapshot (логи авторитетны, /health для
+#   слотов).
 #
-# Побочные эффекты: в stdout — строка роута («lanes: …», «роут:
+# Побочные эффекты: через route_snapshot — podman logs / curl / python3
+#   (см. его docblock); в stdout — строка роута («lanes: …», «роут:
 #   multi_slot (…)» или «роут: singleton+DFlash (…)»); warn() в stderr при
-#   отказе lanes; подпроцессы podman logs / curl / python3. Ничего не меняет.
+#   отказе lanes. Ничего не меняет.
 #
-# Ограничения/допущения: требуются глобалы CONTAINER, PORT, TPL_DIR и warn
-#   (диспетчер). Локалы prof/clog/staged/refused одной строкой: prof — id
-#   профиля из аргумента, clog/staged/refused — строки из логов контейнера
-#   (пусты при отсутствии совпадений grep). Best-effort по дизайну: «|| true»
-#   при grep обязателен под set -e+pipefail (см. ВАЖНО в теле), curl/parse в
-#   ветке 27b-slots заглушены «|| echo '?'»; неизвестный prof попадает в
-#   default-ветку case (singleton+DFlash).
+# Ограничения/допущения: требует warn (диспетчер) и route_snapshot этого
+#   файла. Приоритет расхождений как на этапе 8: staged → refused → «данных
+#   нет». Best-effort по дизайну: пустые поля снимка — штатные ветки («данных
+#   нет», «?»); неизвестный prof попадает в default-ветку case
+#   (singleton+DFlash). Тексты вывода — контракт (spec §7), не менять.
 #
 # @param 1: '27b-single' | '27b-slots' | 'flash-multi'   # канонический id профиля (вызывающие передают resolve_profile; неизвестный → singleton-ветка)
 # @returns integer                                       # всегда 0 — информационная печать, отказы поиска заглушены
 check_route() {
-  local prof="$1" clog staged refused
-  clog=$(podman logs --tail 400 "$CONTAINER" 2>&1 || true)
-  # ВАЖНО: '|| true' обязателен — под set -e+pipefail grep без совпадения
-  # (нормальный случай: lanes приняты, отказа нет) молча убивал весь скрипт
-  staged=$(printf '%s' "$clog" | grep -oE "fn-lanes staged: topology=[a-z]+ lanes=[0-9]+[^\"]*spec=[a-z0-9]+" | tail -1) || true
-  refused=$(printf '%s' "$clog" | grep -oE "qwen4 lanes refused:[^-—]*" | tail -1) || true
+  local prof="$1"
+  route_snapshot
   case "$prof" in
     flash-multi)
-      if [ -n "$staged" ]; then
-        echo "lanes: $staged"
+      if [ -n "$ROUTE_STAGED" ]; then
+        echo "lanes: $ROUTE_STAGED"
         echo "      → настоящий батчинг принят (запросы делят trunk-шаг)"
-      elif [ -n "$refused" ]; then
-        warn "vmm lanes ОТКАЗАНЫ: $refused — сервер работает serial (fallback)"
+      elif [ -n "$ROUTE_REFUSED" ]; then
+        warn "vmm lanes ОТКАЗАНЫ: $ROUTE_REFUSED — сервер работает serial (fallback)"
         warn "тексты eligible-запросов всё равно исполняются корректно (singleton)"
       else
         echo "lanes: данных нет (ни staged, ни refused в логах) — проверь 'hfctl logs'"
       fi
       ;;
-    27b-slots)  echo "роут: multi_slot ($(curl -fsS -m 5 "http://127.0.0.1:$PORT/health" 2>/dev/null | python3 "$TPL_DIR/python/health_mode.py" 2>/dev/null || echo '?'))" ;;
-    *)          echo "роут: singleton+DFlash ($(
-                  printf '%s' "$clog" | grep -oE "spec: [a-z0-9 ]+" | tail -1 | head -c 60))" ;;
+    27b-slots)  echo "роут: multi_slot ($ROUTE_HEALTH)" ;;
+    *)          echo "роут: singleton+DFlash ($ROUTE_SPEC)" ;;
   esac
 }

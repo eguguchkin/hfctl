@@ -24,25 +24,40 @@
 #   или pre-warm-отказ (по set -e процесс завершается этим rc)
 cmd_up()   { rm -f "$STOP_MARKER"; hf_up_locked; wait_health 600; }
 
+# Назначение: единая реализация остановки стека — явный маркер остановки +
+#   `podman compose stop` (последние 2 строки вывода наружу).
+#
+# Побочные эффекты: mkdir -p $STACK_DIR; touch маркера
+#   $STACK_DIR/.hfctl-stopped (ДО stop — вотчдог оглушён даже при сбое
+#   остановки); `podman compose stop` — остановка контейнеров (тома, файлы
+#   стека и образ НЕ удаляются; stderr слит в stdout, хвост — последние 2
+#   строки).
+#
+# Ограничения/допущения: требует глобалы STACK_DIR, STOP_MARKER и CF
+#   (stack.sh). Заглушивание/печать — на совести вызывающего: cmd_down
+#   печатает вывод и терпит rc по set -e, cmd_off заглушает вывод и rc
+#   (`|| true`).
+#
+# @stdout string   # последние 2 строки `podman compose stop`
+# @returns integer # 0 — остановлен; ненулевой rc — сбой compose stop
+#   (pipefail пропускает его наружу, tail не привносит)
+stop_with_marker() { mkdir -p "$STACK_DIR"; touch "$STOP_MARKER"; compose stop 2>&1 | tail -2; }
+
 # Назначение: `hfctl down` (скрытый алиас): ЯВНАЯ остановка стека — с
 #   маркером, чтобы вотчдог не поднял его обратно до следующего `hfctl up`.
 #
-# Побочные эффекты: touch маркера $STACK_DIR/.hfctl-stopped;
-#   `podman compose stop` — остановка контейнеров (контейнеры, тома, файлы
-#   стека и образ НЕ удаляются; вывод слит в stdout, наружу — последние 2
-#   строки); echo итоговой строки. Читает compose-тройку из $STACK_DIR.
+# Побочные эффекты: stop_with_marker (маркер ДО stop + `podman compose
+#   stop`); echo итоговой строки. Читает compose-тройку из $STACK_DIR.
 #
-# Ограничения/допущения: требует глобалы STACK_DIR, STOP_MARKER и CF
-#   (stack.sh). Маркер ставится ДО compose stop — даже при сбое остановки
-#   вотчдог уже оглушён. Сбой compose stop (rc проходит конвейер через
-#   pipefail, tail не привносит) по set -e завершает процесс без итоговой
-#   строки.
+# Ограничения/допущения: требует глобал STACK_DIR (диспетчер) и
+#   stop_with_marker этого файла. Сбой compose stop по set -e завершает
+#   процесс без итоговой строки (маркер уже стоит — вотчдог оглушён).
 #
 # @stdout string   # последние 2 строки `podman compose stop` + строка
 #   «остановлен (контейнеры/файлы/образ целы; вотчдог молчит до 'hfctl up')»
 # @returns integer # 0 — остановлен, вотчдог молчит; ненулевой rc — сбой
 #   compose stop (по set -e процесс завершается до сообщения)
-cmd_down() { touch "$STOP_MARKER"; compose stop 2>&1 | tail -2; echo "остановлен (контейнеры/файлы/образ целы; вотчдог молчит до 'hfctl up')"; }
+cmd_down() { stop_with_marker; echo "остановлен (контейнеры/файлы/образ целы; вотчдог молчит до 'hfctl up')"; }
 
 # Назначение: `hfctl on` (алиас `autostart`): включить автозапуск (юниты +
 #   таймер + linger) и поднять стек прямо сейчас.
@@ -64,9 +79,9 @@ cmd_on()  { cmd_autostart; cmd_up; }
 #   снять автозапуск — юниты удалены, linger выключен; файлы/модели/образ
 #   целы.
 #
-# Побочные эффекты: mkdir -p $STACK_DIR; `podman compose stop` (вывод
-#   заглушён, rc — `|| true`); touch маркера $STACK_DIR/.hfctl-stopped;
-#   systemctl --user disable hipfire-compose.service и
+# Побочные эффекты: stop_with_marker (маркер ДО stop + compose stop; вывод
+#   и rc заглушены — «вотчдог оглушён даже при сбое остановки», семантика
+#   cmd_down); systemctl --user disable hipfire-compose.service и
 #   hipfire-compose-watchdog.timer (stderr заглушён, rc — `|| true`); rm -f
 #   трёх юнит-файлов ~/.config/systemd/user/{hipfire-compose.service,
 #   hipfire-compose-watchdog.service, hipfire-compose-watchdog.timer};
@@ -77,10 +92,10 @@ cmd_on()  { cmd_autostart; cmd_up; }
 # Ограничения/допущения: остановка стека идёт ДО удаления юнитов — oneshot-
 #   юнит контейнеры не держит (compose up -d отсоединён), ExecStop уже
 #   завершённого юнита не сработает. Требует глобалы UNIT_NAME, STOP_MARKER,
-#   STACK_DIR (диспетчер) и CF (stack.sh). Не заглушённые systemctl
-#   daemon-reload и sudo disable-linger при `hfctl off` по set -e завершают
-#   процесс своим rc (юниты к этому моменту уже удалены); вызов из
-#   cmd_uninstall (commands.sh) через `|| true` вешает set -e внутри
+#   STACK_DIR (диспетчер) и CF (stack.sh), stop_with_marker этого файла. Не
+#   заглушённые systemctl daemon-reload и sudo disable-linger при `hfctl off`
+#   по set -e завершают процесс своим rc (юниты к этому моменту уже удалены);
+#   вызов из cmd_uninstall (commands.sh) через `|| true` вешает set -e внутри
 #   функции — там отказы терпят и продолжают.
 #
 # @stdout string   # две итоговые строки («ВЫКЛ: …» и «Файлы, модели и
@@ -91,9 +106,7 @@ cmd_on()  { cmd_autostart; cmd_up; }
 cmd_off() {
   # Юнит oneshot контейнеры не держит (compose up -d отсоединён) — останавливаем
   # стек напрямую, иначе ExecStop не выполнится для уже завершённого юнита.
-  mkdir -p "$STACK_DIR"
-  compose stop >/dev/null 2>&1 || true
-  touch "$STOP_MARKER"
+  stop_with_marker >/dev/null 2>&1 || true
   systemctl --user disable "$UNIT_NAME.service" "$UNIT_NAME-watchdog.timer" 2>/dev/null || true
   rm -f "$HOME/.config/systemd/user/$UNIT_NAME.service" \
         "$HOME/.config/systemd/user/$UNIT_NAME-watchdog.service" \

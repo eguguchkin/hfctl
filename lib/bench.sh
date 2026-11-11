@@ -40,31 +40,37 @@ ar-baseline (без спекуляции) печатается как пропу
 EOF
 }
 
-# Назначение: фактический роут обслуживания (best-effort, логика как у
-#   check_route): для flash-multi — по строке «fn-lanes staged» в логах
-#   (lanes / serial-fallback), для 27b-slots — «multi-slot» статически, иначе
-#   — «spec: dflash» в логах (singleton-dflash) либо serial.
+# Назначение: фактический роут обслуживания в enum артефакта bench — из
+#   общего снимка route_snapshot (health.sh): для flash-multi — наличие
+#   staged-строки lanes (lanes / serial-fallback), для 27b-slots —
+#   «multi-slot» статически (константа артефакта --compare; live-режим слотов
+#   печатается отдельно через bench_slots по /health), иначе — последнее
+#   «spec: …» в логах (singleton-dflash) либо serial.
 #
-# Побочные эффекты: подпроцесс podman (чтение последних 400 строк логов
-#   контейнера; ошибка логов = пустой лог, не отказ); в stdout — одна строка
-#   роута; читает глобал CONTAINER. Сеть и файлы не трогает.
+# Побочные эффекты: через route_snapshot — podman logs / curl / python3
+#   (ошибка логов = пустые поля снимка, не отказ); в stdout — одна строка
+#   роута. Сеть и файлы не трогает.
 #
 # Ограничения/допущения: любой неизвестный prof попадает в singleton-ветку
-#   case; отсутствие строк в логах — не ошибка: grep мимо даёт serial.
+#   case; отсутствие строк в логах — не ошибка: пустые поля дают
+#   serial-fallback/serial. Формат enum — контракт артефакта (--compare),
+#   значения не менять.
 #
 # @param 1: '27b-single' | '27b-slots' | 'flash-multi'                                           # канонический id профиля (важны flash-multi/27b-slots; прочее → singleton-ветка)
 # @stdout 'lanes' | 'serial-fallback' | 'multi-slot' | 'singleton-dflash' | 'singleton-serial'   # фактический роут (см. Назначение); печатается echo с переводом строки
-# @returns integer                                                                               # всегда 0 — отказы поиска заглушены «|| true»
+# @returns integer                                                                               # всегда 0 — отказы поиска заглушены в route_snapshot
 bench_route() {
-  local prof="$1" clog
-  clog=$(podman logs --tail 400 "$CONTAINER" 2>&1 || true)
+  local prof="$1"
+  route_snapshot
   case "$prof" in
-    flash-multi)
-      if printf '%s' "$clog" | grep -q "fn-lanes staged"; then echo "lanes"; else echo "serial-fallback"; fi ;;
+    flash-multi) [ -n "$ROUTE_STAGED" ] && echo "lanes" || echo "serial-fallback" ;;
     27b-slots)
       echo "multi-slot" ;;
     *)
-      if printf '%s' "$clog" | grep -q "spec: dflash"; then echo "singleton-dflash"; else echo "singleton-serial"; fi ;;
+      case "$ROUTE_SPEC" in
+        "spec: dflash"*) echo "singleton-dflash" ;;
+        *)               echo "singleton-serial" ;;
+      esac ;;
   esac
 }
 
