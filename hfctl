@@ -158,7 +158,7 @@ isint() { case "$1" in ''|*[!0-9]*) return 1 ;; *) return 0 ;; esac; }
 #   заглушек на глобалы диспетчера: SC2034 выше — ожидаемые.
 source "$LIB_DIR/profiles.sh"     # table+resolve+gates (нужны только env-константы)
 source "$LIB_DIR/stack.sh"        # CF/compose/env_val/cur_profile/preflight (нужны log/warn/die)
-source "$LIB_DIR/state.sh"        # state-каталоги + сеты моделей
+source "$LIB_DIR/state.sh"        # каталоги моделей по сетам
 source "$LIB_DIR/stack_files.sh"  # render_tpl, sync_tree, write_stack_files, write_env
 source "$LIB_DIR/engine.sh"       # cfgset/apply_profile
 source "$LIB_DIR/health.sh"       # wait_health/smoke/check_route

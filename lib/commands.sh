@@ -2,15 +2,11 @@
 # ── подкоманды: install/use/status/logs/watch/doctor/models/pull/uninstall ──
 
 # Назначение: `hfctl install` — полная установка/обновление стека на голом
-#   Ubuntu/Debian: миграции → RAM-гейт → префлайт хоста → файлы стека →
-#   образ и модели → конфиг профиля → recreate → health → смоук → роут →
-#   автозапуск. Идемпотентен (повтор = донастройка поверх существующего).
+#   Ubuntu/Debian: RAM-гейт → префлайт хоста → файлы стека → образ и модели →
+#   конфиг профиля → recreate → health → смоук → роут → автозапуск.
+#   Идемпотентен (повтор = донастройка поверх существующего).
 #
 # Побочные эффекты (по фазам):
-#   Миграции/чтение: v1-.env без HFCTL_PROFILE — старая модель/порт/bind/
-#     база моделей сохраняются в глобалы (MODEL_DEFAULT/PORT/BIND/
-#     MODELS_BASE); migrate_models — mv плоских файлов $MODELS_BASE в сеты;
-#     migrate_state — cp -a legacy-вольюмов в пустой profiles/<prof>/.
 #   Хост (preflight, sudo точечно): apt podman/podman-compose/curl,
 #     usermod -aG render, limits.d memlock-файл, enable-linger; exit 42 при
 #     свежей группе/лимитах (нужен перезаход/ребут).
@@ -32,7 +28,7 @@
 #   HFCTL_FORCE=1 или --force — FORCE_GATE=1 (обход RAM-гейта с warn);
 #   HFCTL_YES=1 или --yes — неинтерактив. Локалы одной строкой:
 #   prof — алиас профиля из --profile ('' → PROFILE_DEFAULT);
-#   no_autostart/set_port/set_bind/set_models/force — '0' | '1'.
+#   no_autostart/force — '0' | '1'.
 #   exit 42 из preflight прерывает процесс до записи .env.
 #
 # @param 1..N: string[] # флаги (все опциональны): --profile <алиас> |
@@ -41,43 +37,28 @@
 # @returns integer      # всегда 0 при возврате — отказы завершают процесс:
 #   die/profile_gate (1), preflight (42), сбои шагов (set -e)
 cmd_install() {
-  local prof="" no_autostart=0 set_port=0 set_bind=0 set_models=0 force=0
+  local prof="" no_autostart=0 force=0
   while [ $# -gt 0 ]; do
     case "$1" in
       --profile)     prof="$2"; shift 2 ;;
-      --port)        PORT="$2"; set_port=1; shift 2 ;;
-      --bind)        BIND="$2"; set_bind=1; shift 2 ;;
-      --models-dir)  MODELS_DIR="$2"; set_models=1; shift 2 ;;
+      --port)        PORT="$2"; shift 2 ;;
+      --bind)        BIND="$2"; shift 2 ;;
+      --models-dir)  MODELS_DIR="$2"; shift 2 ;;
       --no-autostart) no_autostart=1; shift ;;
       --force)       force=1; shift ;;
       --yes)         ASSUME_YES=1; shift ;;
       *) die "неизвестный флаг install: $1 (доступны: --profile ${PROFILE_LIST// /|} --port --bind --models-dir --no-autostart --yes)" ;;
     esac
   done
-  # миграция v1-.env (нет HFCTL_PROFILE): сохраняем текущую модель/порт/bind/путь
-  if [ -f "$STACK_DIR/.env" ] && [ -z "$(env_val HFCTL_PROFILE)" ]; then
-    local old; old=$(env_val HIPFIRE_MODEL)
-    if [ -n "$old" ]; then
-      MODEL_DEFAULT="$old"
-      warn "миграция: найден старый .env — профиль $PROFILE_DEFAULT, модель по умолчанию остаётся $old"
-    fi
-    local v
-    v=$(env_val HIPFIRE_PORT);        [ -n "$v" ] && [ "$set_port" = 0 ]  && PORT="$v"
-    v=$(env_val HIPFIRE_BIND);        [ -n "$v" ] && [ "$set_bind" = 0 ]  && BIND="$v"
-    v=$(env_val HIPFIRE_MODELS_PATH); [ -n "$v" ] && [ "$set_models" = 0 ] && MODELS_BASE="$v" && set_models_dir "$prof"
-  fi
   prof=$(resolve_profile "${prof:-$PROFILE_DEFAULT}") || die "неизвестный профиль '$prof' (доступны: $PROFILE_LIST)"
   FORCE_GATE="${FORCE_GATE:-}"; [ "${force:-0}" = 1 ] && FORCE_GATE=1
   profile_gate "$prof"          # RAM-гейт: отказ ДО любого скачивания (spec §6)
-  # миграция плоского models/ в сеты (один раз; сохраняет скачанное)
-  migrate_models
   set_models_dir "$prof"
   preflight
-  migrate_state "$prof"        # legacy named volumes → profiles/<prof> (один раз)
   write_stack_files
-  # приоритет: HFCTL_MODEL > сохранённая при миграции модель > дефолт профиля
-  MODEL_DEFAULT="${HFCTL_MODEL:-${MODEL_DEFAULT:-$(profile_field "$prof" 1)}}"
-  write_env "$prof" "$MODEL_DEFAULT"
+  # приоритет: HFCTL_MODEL > дефолт профиля
+  local model; model="${HFCTL_MODEL:-$(profile_field "$prof" 1)}"
+  write_env "$prof" "$model"
   log "образ $IMAGE (если ещё не локально)"
   podman image exists "$IMAGE" || podman pull "$IMAGE"
   pull_profile_models "$prof"
@@ -113,10 +94,9 @@ EOF
 #   health → смоук → роут; при неподошедшем профиле — откат канона.
 #
 # Побочные эффекты (по фазам): profile_gate (отказ — exit 1 ДО скачивания);
-#   migrate_models + set_models_dir — раскладка по сетам и перестановка
-#   глобала MODELS_DIR на сет профиля (нестандартная база из старого .env
-#   уважается, сет — новый); preflight (sudo точечно, exit 42);
-#   migrate_state (cp -a legacy-вольюмов в profiles/<p>); pull_profile_models
+#   set_models_dir — раскладка по сетам и перестановка глобала MODELS_DIR на
+#   сет профиля (нестандартная база из старого .env уважается, сет — новый);
+#   preflight (sudo точечно, exit 42); pull_profile_models
 #   — докачка недостающих моделей/драфта; write_env — ПЕРЕЗАПИСЬ .env
 #   (HFCTL_PROFILE=новый, порт/bind из прежнего .env); compose up -d +
 #   apply_profile (cfgset) + `up -d --force-recreate`. Откатная ветка
@@ -131,7 +111,8 @@ EOF
 #   install). Env-входы: HFCTL_MODEL — модель по умолчанию; HFCTL_FORCE=1
 #   или --force — обход RAM-гейта. Локалы: p — алиас/канон профиля
 #   (resolve_profile); force — '0' | '1'; prev_prof/prev_model — снимок до
-#   смены (для отката, verbatim cur_profile/cur_model); v/mb — строки из
+#   смены (для отката, verbatim cur_profile/cur_model); model — модель по
+#   умолчанию для .env (HFCTL_MODEL env / поле 1 профиля); v/mb — строки из
 #   .env ('' — ключа нет).
 #
 # @param 1..N: string[] # <алиас|id профиля> в любом порядке с опциональным
@@ -153,7 +134,6 @@ cmd_use() {
   prev_prof=$(cur_profile); prev_model=$(cur_model)
   [ "${force:-0}" = 1 ] && FORCE_GATE=1
   profile_gate "$p"             # RAM-гейт: отказ ДО любого скачивания (spec §6)
-  migrate_models                # плоский models/ (старые версии) → сеты
   set_models_dir "$p"
   # порт/bind — из текущего .env (use не трогает параметры, только профиль);
   # путь моделей: уважаем старую базу (если была нестандартная), сет — новый
@@ -170,10 +150,9 @@ cmd_use() {
     set_models_dir "$p"
   fi
   preflight
-  migrate_state "$p"           # legacy named volumes → profiles/<p> (один раз)
   pull_profile_models "$p"
-  MODEL_DEFAULT="${HFCTL_MODEL:-$(profile_field "$p" 1)}"
-  write_env "$p" "$MODEL_DEFAULT"
+  local model; model="${HFCTL_MODEL:-$(profile_field "$p" 1)}"
+  write_env "$p" "$model"
   compose up -d 2>&1 | tail -2      # контейнеры могут быть остановлены (off)
   apply_profile "$p"
   compose up -d --force-recreate 2>&1 | tail -2
@@ -421,8 +400,7 @@ cmd_mode() {
 # Побочные эффекты: только чтение и печать (stdout, warn в stderr):
 #   /etc/os-release, /proc/meminfo, наличие /dev/kfd и /dev/dri/renderD*,
 #   таблица профилей (RAM-гейт по каждому), .env (cur_profile/cur_model),
-#   state-каталоги профиля, podman volume exists (legacy-вольюмы),
-#   podman --version, id -nG, limits.d-файл, fuser по
+#   state-каталоги профиля, podman --version, id -nG, limits.d-файл, fuser по
 #   /run/lock/hipfire/gpu-pci-*.lock, curl GET /health (первые 200 байт).
 #   Ничего не создаёт, не удаляет, sudo не зовёт.
 #
@@ -460,9 +438,6 @@ cmd_doctor() {
       echo "state: $sd (per-профиль config+kernel; disk-тир кэша — внутри config/)"
     else
       warn "state: $sd отсутствует или не записуем — пересоздай стек (hfctl install)"
-    fi
-    if podman volume exists hipfire_hipfire-config 2>/dev/null; then
-      warn "state: legacy-вольюмы (hipfire_hipfire-config/kernels) ещё живут (установка до этапа 7) — удаляются uninstall"
     fi
   else
     echo "стек: НЕ УСТАНОВЛЕН ($STACK_DIR/.env нет) — 'hfctl install'"
@@ -533,8 +508,8 @@ cmd_models() {
 #   переключения (прогрев/бэкап-сет на слабой машине легален).
 #
 # Побочные эффекты: mkdir -p базы $MODELS_BASE и каталога целевого сета;
-#   migrate_models (mv плоских файлов в сеты); pull_profile_models с
-#   env-префиксом MODELS_DIR=целевой сет (глобал MODELS_DIR НЕ сдвигается)
+#   pull_profile_models с env-префиксом MODELS_DIR=целевой сет (глобал
+#   MODELS_DIR НЕ сдвигается)
 #   — подтяжка образа и докачка недостающих моделей/драфта по сети; log и
 #   две итоговые строки в stdout. .env, конфиг движка, контейнеры и
 #   автозапуск НЕ трогаются.
@@ -553,7 +528,6 @@ cmd_pull() {
   # скачивание ≠ запуск: RAM-гейт НЕ применяем (бэкап-сет на слабой машине легален)
   [ -f "$STACK_DIR/.env" ] || die "стек не установлен — сначала 'hfctl install'"
   [ -d "$MODELS_BASE" ] || mkdir -p "$MODELS_BASE"
-  migrate_models
   local target="$MODELS_BASE/$(model_set "$p")"
   mkdir -p "$target"
   log "тяну сет '$(model_set "$p")' профиля $p в $target (без переключения профиля)"
@@ -569,8 +543,7 @@ cmd_pull() {
 # Побочные эффекты (по порядку): подтверждение ask (не-TTY или без --yes —
 #   авто-нет → «отменено», exit 0 без изменений); cmd_off || true (стоп
 #   контейнеров, маркер остановки, юниты ~/.config/systemd/user/* удалены,
-#   daemon-reload, linger off); compose down (контейнеры + сеть проекта);
-#   podman volume rm legacy-вольюмов hipfire_hipfire-config/-kernels.
+#   daemon-reload, linger off); compose down (контейнеры + сеть проекта).
 #   Границы rm -rf: $STACK_DIR ЦЕЛИКОМ (бинарь hfctl, lib/, tpl/,
 #   compose-файлы, .env, модели и state по путям по умолчанию), поэтому при
 #   сохранении моделей база УВОЗИТСЯ целиком (mv $MODELS_BASE →
@@ -602,7 +575,7 @@ cmd_uninstall() {
     esac
   done
   echo "uninstall снимет: контейнеры, сеть проекта, state-каталоги $STATE_BASE"
-  echo "(конфиг/disk-тир кэша/kernels на профиль) + legacy-вольюмы,"
+  echo "(конфиг/disk-тир кэша/kernels на профиль),"
   echo "юниты+таймер автозапуска, limits.d, каталог стека $STACK_DIR (включая hfctl)."
   echo "Модели $MODELS_DIR: $([ "$purge_models" = 1 ] && echo 'УДАЛЯЮТСЯ (--purge-models)' || echo 'СОХРАНЯЮТСЯ (переезжают в стеке)')"
   echo "Образ $IMAGE: $([ "$purge_image" = 1 ] && echo 'УДАЛЯЕТСЯ (--purge-image)' || echo 'остаётся (--purge-image — удалить)')"
@@ -610,7 +583,6 @@ cmd_uninstall() {
   ask "Продолжить? [y/N] " || { echo "отменено"; exit 0; }
   cmd_off || true
   ( cd "$STACK_DIR" 2>/dev/null && compose down 2>&1 | tail -2 ) || true
-  podman volume rm hipfire_hipfire-config hipfire_hipfire-kernels 2>/dev/null || true
   # модели живут в базе (models/<сет>/ на ВСЕ сеты!) — при сохранении
   # переезжает БАЗА целиком: иначе rm -rf $STACK_DIR сносит чужие сеты
   keep=""

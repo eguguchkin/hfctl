@@ -121,8 +121,8 @@ ensure_symlink() {
 #
 # Ограничения/допущения: требует глобалы STACK_DIR, MODELS_DIR, TPL_DIR,
 #   DRAFT_FILE, log (диспетчер), cur_profile (stack.sh), profile_field
-#   (profiles.sh). Порядок: после migrate_state и set_models_dir (state-
-#   каталоги и сет моделей должны существовать до генерации) и ДО первого
+#   (profiles.sh). Порядок: после set_models_dir (state-каталоги и сет
+#   моделей должны существовать до генерации) и ДО первого
 #   `compose up`/recreate (podman-compose читает каноническую -f-тройку
 #   при каждом вызове); .env пишется вызывающим сразу после, до compose up.
 #   DFlash-строка выбирается по профилю ПРЕЖНЕГО .env (чистый стек →
