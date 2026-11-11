@@ -278,12 +278,72 @@ python-помощники, bench-фикстура). Дистрибуция — �
 
 ### DoD (внешние, реальные машины — ТОЛЬКО после предупреждения
 ### пользователя и его подтверждения; машины в работе)
-- [ ] 10. Прод-машина (60 GiB): обновление деревом через install.sh
+- [x] 10. Прод-машина (60 GiB): обновление деревом через install.sh
       (healthy до/после) → полный цикл: use↔use (27b-slots → 27b-single),
       off→on, ребут → сам подъём канона, healthy + smoke. Итог: 27b-single
-      healthy.
-- [ ] 11. Вторая машина (128 GB, лёгкое): обновление деревом через
-      install.sh без остановки → flash-multi healthy + smoke.
-- [ ] 12. hflab: AGENTS.md (hfctl-секция: дерево, дистрибуция) +
-      STATE.md; артефакты приёмки — `.local-analysis/` (в hfctl-репо —
-      0 имён хостов/IP/логов, AGENTS правило 7).
+      healthy. — PASS 2026-11-10 (EXP-001 + EXP-001r1-verify).
+- [x] 11. Вторая машина (128 GB): расширено пользователем до ПОЛНОГО цикла с
+      ребутом — EXP-003 прогон 4 rc=0 (update деревом, use↔use, off/on, ребут →
+      сам-подъём, финал flash-multi healthy+lanes, прод recovered) — PASS 2026-11-10.
+- [x] 12. hflab: AGENTS.md (hfctl-секция: дерево, дистрибуция git clone) +
+      STATE.md — закрыто 2026-11-10; артефакты приёмки —
+      `.local-analysis/task8-exp/`.
+
+## Этап 9 — зачистка переходного, мёртвого и дублей (по ревизии 2026-11-11)
+
+Основание: `hflab/.local-analysis/hfctl-audit-recon.md` (scout, HEAD 336cd1f:
+мёртвых функций нет; переходное/мусор/дубли/швы — разделы 2–5). Контекст
+решения пользователя: hfctl НЕ публичен (закрыт на GitHub), адресатов две
+живые машины — значит переходные механизмы сначала **домигрировать на
+машинах**, затем удалить из кода всё переходное.
+
+### Порядок (предпосылка до кодовых коммитов)
+- [ ] 0а. Read-only аудит миграций на обеих машинах: per-профильные каталоги
+      vs содержимое legacy-вольюмов (FAEX1: hipfire_hipfire-config/kernels ещё
+      существуют), сетовая раскладка моделей, HFCTL_PROFILE в .env.
+- [ ] 0б. ГО пользователя (деструктив): tar-бэкап (config БЕЗ session-cache —
+      он ротируется; kernels целиком) в ~/hipfire/ → `podman volume rm`
+      legacy-вольюмов на FAEX1. На evo legacy нет (чужой hfbox-hipfire-config
+      не трогать).
+
+### DoD (код, внутренние; поведение CLI сохраняется, кроме явно перечисленного)
+- [ ] 1. Удалено переходное: migrate_state, migrate_models, state_dir
+      (последние потребители — log-строки миграций), v1-.env ветка
+      cmd_install/use (+ implicit-глобал MODEL_DEFAULT), doctor-warn про
+      legacy-вольюмы, `podman volume rm` из uninstall.
+- [ ] 2. Удалён мёртвый код: write-only `BIND` в cmd_bench; `retries` — при
+      имплементации: печать в cmd_watch только при ≠0 ИЛИ удалить поле
+      (решение фиксируется в task-9.md).
+- [ ] 3. env.tpl: убрана строка COMPOSE_FILE (никто не читает, вводит в
+      заблуждение; осознанное изменение генерируемого .env — golden обновлён
+      с явным diff в отчёте).
+- [ ] 4. Убран репо-дубль benchmarks/prompts/ (канон фикстуры — tpl/bench/;
+      механизм prompts-маунта остаётся).
+- [ ] 5. Один канал форса гейта: флаг --force + документированный env-синоним;
+      второй теневой var удалён/объединён; README освещает оба.
+- [ ] 6. Дубли сведены: общий предикат роута (один helper — источник для
+      check_route И bench_route; тексты check_route не меняются); cmd_off
+      переиспользует остановку cmd_down (одна реализация маркер+stop).
+- [ ] 7. Швы: cfgset возвращает rc + stderr-хвост (apply_profile warn'ит об
+      отказе ключей, не умирает); cmd_boot — force-recreate ВНУТРИ того же
+      flock (без гонки); cur_model — мёртвый fallback удалён; keep в
+      cmd_uninstall — local; usage() — извлечение справки маркерами/awk без
+      жёстких номеров строк.
+- [ ] 8. Регресс: bash -n везде; shellcheck — новый базлайн-мультимножество
+      после удалений (зафиксировать в task-9.md); golden-файлы — осознанно
+      обновлён только .env (COMPOSE_FILE), остальное байт-в-байт; CLI-parity
+      (идентично, кроме п.3 и исчезновения warn-строк удалённых веток);
+      install.sh sandbox; харнесы этапа 8 (pure funcs, ttft, bench-python)
+      зелёные.
+- [ ] 9. spec/hfctl.md — addendum контрактов (cfgset-rc, route-helper, env без
+      COMPOSE_FILE, форс-канал); README: --force + env-синоним.
+
+### DoD (внешние, машины — только с GO пользователя)
+- [ ] 10. che-evo: update деревом → use↔use → off/on → doctor (warn про
+      вольюмы отсутствует) → smoke → **ребут → сам-подъём** (cmd_boot менялся —
+      boot-приёмка обязательна) → healthy+smoke, итог 27b-single.
+- [ ] 11. che-FAEX1: update деревом без остановки → doctor → smoke →
+      flash-multi healthy + `fn-lanes staged`; legacy-вольюмов в
+      `podman volume ls` нет (после 0б).
+- [ ] 12. hflab: AGENTS.md hfctl-секция (переходного нет; env без COMPOSE_FILE;
+      форс-канал) + STATE.md; hfctl spec/state.md — «этап 9 принят».
