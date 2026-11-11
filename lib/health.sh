@@ -49,28 +49,49 @@ wait_health() {
 #   с max_tokens=200 и reasoning_effort=none; непустота content проверяет
 #   smoke_resp.py.
 #
-# Побочные эффекты: 2 реальных запроса генерации к модели на
-#   127.0.0.1:$PORT (curl -m 300); подпроцесс python3; в stdout — log-строка,
-#   строки «ответ: <до 60 символов>» от smoke_resp.py и «SMOKE: OK»; при
+# Побочные эффекты: до 4 реальных запросов генерации к модели на
+#   127.0.0.1:$PORT (curl -m 300; 2 промпта × до 2 попыток); подпроцессы
+#   python3; sleep 15 на каждый ретрай; в stdout — log-строка, строки
+#   «ответ: <до 60 символов>» от smoke_resp.py (в т.ч. «ответ: (ПУСТО)» на
+#   неудачной попытке) и «SMOKE: OK»; warn() в stderr при ретраях; при
 #   провале — FATAL-строка die() в stderr. Файлы и конфиг не меняет.
 #
 # Ограничения/допущения: без параметров; требуются глобалы PORT, TPL_DIR и
-#   log/die/cur_model (диспетчер/stack.sh). Сбой curl или пустой content
-#   только помечают провал (ok=0) и дают второму запросу отработать; не-JSON
-#   ответ даёт smoke_resp.py ненулевой rc со traceback в stderr. Провал —
-#   die(): процесс диспетчера завершается с кодом 1, возврат функции
+#   log/warn/die/cur_model (диспетчер/stack.sh). На каждый промпт — одна
+#   повторная попытка через 15 с при НЕнулевом результате (curl упал либо
+#   smoke_resp дал пустой content/не-JSON): после recreate движок довязывает
+#   ядра уже после ready (окно холодного прогрева — преходящий пустой ответ
+#   или 5xx при живом здоровом сервере). Вторая попытка тоже неудачна →
+#   ok=0 и итог как прежде. Промпты независимы: провал одного не мешает
+#   отработать другому. Вызывающие — cmd_install (после wait_health 900) и
+#   cmd_use (после wait_health 600), обе интерактивны: внешний бюджет времени
+#   на путь smoke не действует (boot-юнит с TimeoutStartSec=900 вызывает
+#   _boot, который smoke НЕ зовёт); худший бюджет smoke — 2×(300+15+300) с.
+#   Провал — die(): процесс диспетчера завершается с кодом 1, возврат функции
 #   вызывающий перехватить не успевает.
 #
 # @returns integer # всегда 0 при возврате — провал завершает процесс через die() (exit 1)
+# @stderr string   # warn-строка «смоук-запрос … повторяю через 15 с …» на
+#   каждую первую неудачную попытку; FATAL-строка die() при итоговом провале
 smoke() {
   log "смоук: 2 запроса"
-  local ok=1 prompt
+  # shortcut: один ретрай на промпт (преходящий холодный прогрев ядер);
+  # апгрейд — поллинг готовности ядер, когда движок отдаст это наружу.
+  local ok=1 prompt try out
   for prompt in "Ответь ровно: ок" "Напиши одну строку кода на python: hello world"; do
-    local out
-    out=$(curl -fsS -m 300 "http://127.0.0.1:$PORT/v1/chat/completions" \
-      -H 'Content-Type: application/json' \
-      -d "{\"model\":\"$(cur_model)\",\"messages\":[{\"role\":\"user\",\"content\":\"$prompt\"}],\"max_tokens\":200,\"reasoning_effort\":\"none\"}" 2>/dev/null) || { ok=0; continue; }
-    printf '%s' "$out" | python3 "$TPL_DIR/python/smoke_resp.py" || ok=0
+    try=0
+    while :; do
+      try=$((try+1))
+      if out=$(curl -fsS -m 300 "http://127.0.0.1:$PORT/v1/chat/completions" \
+        -H 'Content-Type: application/json' \
+        -d "{\"model\":\"$(cur_model)\",\"messages\":[{\"role\":\"user\",\"content\":\"$prompt\"}],\"max_tokens\":200,\"reasoning_effort\":\"none\"}" 2>/dev/null) && \
+         printf '%s' "$out" | python3 "$TPL_DIR/python/smoke_resp.py"; then
+        break
+      fi
+      [ "$try" = 1 ] || { ok=0; break; }
+      warn "смоук-запрос не ответил содержимым — повторяю через 15 с (холодный прогрев ядер)"
+      sleep 15
+    done
   done
   [ "$ok" = 1 ] || die "смоук не прошёл — смотри 'hfctl logs'"
   echo "SMOKE: OK"
