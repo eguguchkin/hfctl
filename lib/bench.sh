@@ -554,8 +554,8 @@ cmd_bench() {
 
   local prof model md5_real body img ts_iso fname artifact base=""
   prof=$(cur_profile); model=$(cur_model)
-  # Фикстура solo-code: shipped-копия benchmarks/prompts/merge_sort_thinking_off.txt
-  # (в tpl/bench; байты-в-байты, md5-гейт ниже). НЕ редактировать: любая правка
+  # Фикстура solo-code: канон — tpl/bench/merge_sort_thinking_off.txt
+  # (байты-в-байты, md5-гейт ниже). НЕ редактировать: любая правка
   # меняет md5 и сравнимость замеров.
   cp "$TPL_DIR/bench/merge_sort_thinking_off.txt" "$BENCH_TMP/c_code.txt"
   md5_real=$(md5sum "$BENCH_TMP/c_code.txt" | cut -d' ' -f1)
