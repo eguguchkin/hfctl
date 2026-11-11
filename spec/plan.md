@@ -339,10 +339,10 @@ python-помощники, bench-фикстура). Дистрибуция — �
       COMPOSE_FILE, форс-канал); README: --force + env-синоним.
 
 ### DoD (внешние, машины — только с GO пользователя)
-- [ ] 10. che-evo: update деревом → use↔use → off/on → doctor (warn про
+- [ ] 10. прод-машина (60 GiB): update деревом → use↔use → off/on → doctor (warn про
       вольюмы отсутствует) → smoke → **ребут → сам-подъём** (cmd_boot менялся —
       boot-приёмка обязательна) → healthy+smoke, итог 27b-single.
-- [ ] 11. che-FAEX1: update деревом без остановки → doctor → smoke →
+- [ ] 11. вторая машина (128 GB): update деревом без остановки → doctor → smoke →
       flash-multi healthy + `fn-lanes staged`; legacy-вольюмов в
       `podman volume ls` нет (после 0б).
 - [ ] 12. hflab: AGENTS.md hfctl-секция (переходного нет; env без COMPOSE_FILE;

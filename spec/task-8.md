@@ -60,11 +60,11 @@
 Внешние (реальные машины; **запуск — только после предупреждения
 пользователя**, машины используются — пользователь переключит модели):
 
-- [ ] 10. che-evo: обновление деревом через `install.sh` (сервер healthy до
+- [ ] 10. прод-машина (60 GiB): обновление деревом через `install.sh` (сервер healthy до
       и после) → **полный цикл**: `use 27b-slots` → `use 27b-single`
       (use↔use), `off` → `on`, ребут → канонический профиль поднялся сам,
       healthy + smoke. Итог: 27b-single healthy.
-- [ ] 11. che-FAEX1 (лёгкое): обновление деревом через `install.sh` →
+- [ ] 11. вторая машина (128 GB) (лёгкое): обновление деревом через `install.sh` →
       flash-multi healthy + smoke. Без остановки.
 - [ ] 12. hflab: AGENTS.md (hfctl-секция: дерево, дистрибуция) и STATE.md
       обновлены; логи/артефакты приёмки — в hflab `.local-analysis/`
@@ -856,7 +856,7 @@ harness'а tester'а; продукт НЕ менялся — HEAD `92920d5`,
 `git diff 4ad0519..HEAD` = только `spec/task-8.md`; `$S/tree` = HEAD
 bayt-в-байт по всем продуктовым файлам)
 
-**Разбор FAIL'а EXP-001 (P6).** Пользователь дал GO на che-evo; EXP-001
+**Разбор FAIL'а EXP-001 (P6).** Пользователь дал GO на прод-машина (60 GiB); EXP-001
 отработал: P1–P5 зелёные (update деревом md5 `cfba2fbf → cd623950`,
 use↔use 27b-slots/27b-single, off/on), P6 формально FAIL: «канон не
 healthy в течение 15 мин после ребута». Причина — баг HARNESS'а
@@ -967,7 +967,7 @@ Harness `/tmp/hfctl-stage8/test/`, tree-снапшот refreshён с HEAD (md5-
 
 Вердикт (round 2): **BLOCKED-EXTERNAL** — EXP-003 полностью проверен и
 готов (dry-render-режимы зелёные в обоих вариантах proof); реальный прогон
-на che-FAEX1 — после GO (машина свободна с 2026-11-10; CLONE Wi-Fi
+на вторая машина (128 GB) — после GO (машина свободна с 2026-11-10; CLONE Wi-Fi
 докачка mq6-xt ~21 GB учтена в скрипте: ~20–25 мин, общий прогон ≤ ~90
 мин). EXP-002 остаётся запасным лёгким вариантом (готов, не запускался).
 Закрытие: реальный прогон EXP-003 → result-proof → DoD 11 закрыт → DoD 12
@@ -1185,7 +1185,7 @@ C1 `4ad0519`; md5 диспетчера хоста после update = `cd623950`
 DoD 12 → reviewer → C2.
 
 ## DoD 11 — external run (оркестратор, 2026-11-10): EXP-003 прогон 4 → PASS
-Четвёртый запуск EXP-003 (после fix-раундов 1–4) на che-FAEX1, `HAVE_REBOOT_BOOT=1`, rc=0:
+Четвёртый запуск EXP-003 (после fix-раундов 1–4) на вторая машина (128 GB), `HAVE_REBOOT_BOOT=1`, rc=0:
 P1 пред-чек (flash-multi healthy, mq6-xt уже на диске) → P1.5 lane-бейслайн → P2 update
 из свежего клона GitHub main (UPDATE_OK; lib=10/tpl=6, md5 клон==стек=cd623950…; сервер не
 останавливался, StartedAt не менялся) → P3 use 27b-single (singleton+DFlash, smoke OK;
