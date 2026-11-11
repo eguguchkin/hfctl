@@ -1,5 +1,27 @@
 # shellcheck shell=bash
-wait_health() {  # wait_health [timeout_sec]
+# ── health: ожидание готовности, смоук, фактический роут ──────────────────────
+# Модуль не определяет собственных глобалов; читает PORT/CONTAINER/TPL_DIR
+# (диспетчер) и cur_model (lib/stack.sh), пишет лог через log/warn/die.
+# Вызывается из commands.sh (install/use), autostart.sh (up) и bench.sh (--fresh).
+
+# Назначение: ждать готовности сервера — опрос GET /health каждые 5 с, пока
+#   health_ok.py не примет ответ (status ok, model непустой, loading_model
+#   не задан).
+#
+# Побочные эффекты: в stdout — log-строка ожидания, при успехе первые 300
+#   байт тела /health и строка «HEALTHY после Nс», при неудаче — хвост логов
+#   контейнера (podman logs) в stdout; warn() в stderr; подпроцессы
+#   curl/python3/podman; спит по 5 с за итерацию; состояние стека не меняет.
+#
+# Ограничения/допущения: требуются глобалы PORT, CONTAINER, TPL_DIR и хелперы
+#   log/warn (диспетчер). Локалы t/i одной строкой: t — целые секунды таймаута
+#   (значение по умолчанию 900 при пропуске аргумента), i — истёкшие секунды
+#   (кратно 5). Ранний выход по «pre-warm failed» в логах срабатывает только
+#   после 120 с ожидания — таймаут меньше этого лишь отключает эту проверку.
+#
+# @param 1: integer  # таймаут в секундах (опциональный, default 900; живые вызовы: 600/900)
+# @returns integer   # 0 — готов; 1 — pre-warm упал или таймаут (подробности в stdout/stderr)
+wait_health() {
   local t="${1:-900}" i=0
   log "жду готовности (до ${t}с)"
   while [ "$i" -lt "$t" ]; do
@@ -22,6 +44,24 @@ wait_health() {  # wait_health [timeout_sec]
   return 1
 }
 
+# Назначение: смоук-проверка живого сервера — 2 запроса к
+#   /v1/chat/completions (проза «Ответь ровно: ок» + одна строка python-кода)
+#   с max_tokens=200 и reasoning_effort=none; непустота content проверяет
+#   smoke_resp.py.
+#
+# Побочные эффекты: 2 реальных запроса генерации к модели на
+#   127.0.0.1:$PORT (curl -m 300); подпроцесс python3; в stdout — log-строка,
+#   строки «ответ: <до 60 символов>» от smoke_resp.py и «SMOKE: OK»; при
+#   провале — FATAL-строка die() в stderr. Файлы и конфиг не меняет.
+#
+# Ограничения/допущения: без параметров; требуются глобалы PORT, TPL_DIR и
+#   log/die/cur_model (диспетчер/stack.sh). Сбой curl или пустой content
+#   только помечают провал (ok=0) и дают второму запросу отработать; не-JSON
+#   ответ даёт smoke_resp.py ненулевой rc со traceback в stderr. Провал —
+#   die(): процесс диспетчера завершается с кодом 1, возврат функции
+#   вызывающий перехватить не успевает.
+#
+# @returns integer # всегда 0 при возврате — провал завершает процесс через die() (exit 1)
 smoke() {
   log "смоук: 2 запроса"
   local ok=1 prompt
@@ -36,9 +76,25 @@ smoke() {
   echo "SMOKE: OK"
 }
 
-check_route() {  # check_route <profile> — фактический роут (spec §7): движок
-  # может вежливо деградировать (vmm lanes refused → serial) — показываем реальность.
-  # Источники: логи (fn-lanes staged / lanes refused — авторитетно) + health.
+# Назначение: показать фактический роут профиля (spec §7): движок может
+#   вежливо деградировать (vmm lanes refused → serial) — показываем реальность.
+#   Источники: логи (fn-lanes staged / lanes refused — авторитетно) + health.
+#
+# Побочные эффекты: в stdout — строка роута («lanes: …», «роут:
+#   multi_slot (…)» или «роут: singleton+DFlash (…)»); warn() в stderr при
+#   отказе lanes; подпроцессы podman logs / curl / python3. Ничего не меняет.
+#
+# Ограничения/допущения: требуются глобалы CONTAINER, PORT, TPL_DIR и warn
+#   (диспетчер). Локалы prof/clog/staged/refused одной строкой: prof — id
+#   профиля из аргумента, clog/staged/refused — строки из логов контейнера
+#   (пусты при отсутствии совпадений grep). Best-effort по дизайну: «|| true»
+#   при grep обязателен под set -e+pipefail (см. ВАЖНО в теле), curl/parse в
+#   ветке 27b-slots заглушены «|| echo '?'»; неизвестный prof попадает в
+#   default-ветку case (singleton+DFlash).
+#
+# @param 1: '27b-single' | '27b-slots' | 'flash-multi'   # канонический id профиля (вызывающие передают resolve_profile; неизвестный → singleton-ветка)
+# @returns integer                                       # всегда 0 — информационная печать, отказы поиска заглушены
+check_route() {
   local prof="$1" clog staged refused
   clog=$(podman logs --tail 400 "$CONTAINER" 2>&1 || true)
   # ВАЖНО: '|| true' обязателен — под set -e+pipefail grep без совпадения

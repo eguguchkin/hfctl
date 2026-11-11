@@ -5,8 +5,20 @@
 # usage, τ/TTFT — best-effort из логов движка (нет данных = пусто, не выдумываем).
 # Python-помощники живут в tpl/python/ (контракты — spec/task-8.md Design §4),
 # многострочные awk — в tpl/awk/, фикстура — в tpl/bench/.
+# @type /^[\da-f]{32}$/ # канонический md5 фикстуры solo-code (tpl/bench/merge_sort_thinking_off.txt);
+#   несовпадение при прогоне — warn, сравнимость замеров и --compare под вопросом
 BENCH_FIXTURE_MD5=253c7ac50857fe6d0e10fb0d2c5e35c0
 
+# Назначение: напечатать usage-справку `hfctl bench` (heredoc: режимы, флаги,
+#   артефакт).
+#
+# Побочные эффекты: только stdout; читает глобал STACK_DIR (путь каталога
+#   артефактов подставляется в текст). Сеть, файлы, сервер не трогает.
+#
+# Ограничения/допущения: без параметров; текст не выведен из кода cmd_bench —
+#   при смене флагов/сценариев правится руками синхронно.
+#
+# @returns integer # всегда 0
 bench_help() {
   cat <<EOF
 hfctl bench — бенч производительности сервера (локально, без ssh)
@@ -28,7 +40,22 @@ ar-baseline (без спекуляции) печатается как пропу
 EOF
 }
 
-bench_route() {  # фактический роут из логов/профиля (best-effort, как check_route)
+# Назначение: фактический роут обслуживания (best-effort, логика как у
+#   check_route): для flash-multi — по строке «fn-lanes staged» в логах
+#   (lanes / serial-fallback), для 27b-slots — «multi-slot» статически, иначе
+#   — «spec: dflash» в логах (singleton-dflash) либо serial.
+#
+# Побочные эффекты: подпроцесс podman (чтение последних 400 строк логов
+#   контейнера; ошибка логов = пустой лог, не отказ); в stdout — одна строка
+#   роута; читает глобал CONTAINER. Сеть и файлы не трогает.
+#
+# Ограничения/допущения: любой неизвестный prof попадает в singleton-ветку
+#   case; отсутствие строк в логах — не ошибка: grep мимо даёт serial.
+#
+# @param 1: '27b-single' | '27b-slots' | 'flash-multi'                                           # канонический id профиля (важны flash-multi/27b-slots; прочее → singleton-ветка)
+# @stdout 'lanes' | 'serial-fallback' | 'multi-slot' | 'singleton-dflash' | 'singleton-serial'   # фактический роут (см. Назначение); печатается echo с переводом строки
+# @returns integer                                                                               # всегда 0 — отказы поиска заглушены «|| true»
+bench_route() {
   local prof="$1" clog
   clog=$(podman logs --tail 400 "$CONTAINER" 2>&1 || true)
   case "$prof" in
@@ -41,19 +68,69 @@ bench_route() {  # фактический роут из логов/профил�
   esac
 }
 
-bench_slots() {  # фактическое число слотов (health → fallback на $SLOTS)
+# Назначение: фактическое число слотов multi-slot из capabilities живого
+#   /health (tpl/python/bench_slots.py), с фолбэком на глобал $SLOTS при
+#   любой неудаче чтения/разбора.
+#
+# Побочные эффекты: HTTP GET /health через curl (localhost, таймаут 5 с) +
+#   подпроцесс python3; в stdout — число слотов; читает глобалы PORT, SLOTS.
+#   Файлы и сервер не меняет.
+#
+# Ограничения/допущения: сервер недоступен, не-JSON ответ или пустой
+#   capabilities.multi_slot_slots — python печатает пустое либо падает, и
+#   всегда возвращается $SLOTS; функция не может завершиться ошибкой.
+#
+# @stdout /\d+/      # число слотов (при пустом /health — значение глобала SLOTS)
+# @returns integer   # всегда 0
+bench_slots() {
   local s
   s=$(curl -fsS -m 5 "http://127.0.0.1:$PORT/health" 2>/dev/null | python3 "$TPL_DIR/python/bench_slots.py" 2>/dev/null || true)
   echo "${s:-$SLOTS}"
 }
 
-bench_payload() {  # bench_payload <out.json> <content_file> <max_tokens> [stream 0|1]
+# Назначение: собрать OpenAI-payload JSON (model — cur_model(), temperature 0,
+#   reasoning_effort "none", max_tokens $3, stream при $4=1) через
+#   tpl/python/bench_payload.py.
+#
+# Побочные эффекты: ПЕРЕЗАПИСЬ файла $1; читает текстовый промпт $2 как есть;
+#   подпроцесс python3; читает глобалы TPL_DIR и текущую модель (cur_model).
+#
+# Ограничения/допущения: reasoning_effort "none" и temperature 0 зашиты в
+#   генератор (защита коротких max_tokens от thinking-бюджета — грабля
+#   hflab №1); отсутствующий/нечитаемый $2 или нечисловой $3 — python падает
+#   с ненулевым rc (под set -e команда вызывающего прерывается).
+#
+# @param 1: string        # путь выходного payload (.json, перезаписывается)
+# @param 2: string        # путь текстового файла промпта (содержимое → messages)
+# @param 3: /\d+/         # max_tokens запроса
+# @param 4: '0' | '1'     # стриминг (опциональный, default '0')
+# @returns integer        # 0 — payload записан; ненулевой — ошибка python
+bench_payload() {
   python3 "$TPL_DIR/python/bench_payload.py" \
     "$1" "$2" "$3" "${4:-0}" "$(cur_model)"
 }
 
-bench_req() {  # bench_req <payload.json> <resp_file> <timeout> → "wall prompt_tokens completion_tokens"
-  # curl без ответа/ошибки → rc!=0; usage отсутствует → rc=4 (caller: WARN+пропуск)
+# Назначение: один замеряемый запрос к живому серверу: curl POST
+#   /v1/chat/completions с payload $1 (wall — разница date до/после curl),
+#   разбор usage через tpl/python/bench_req.py; stdout —
+#   «wall prompt_tokens completion_tokens».
+#
+# Побочные эффекты: РЕАЛЬНАЯ генерация у модели по сети (расходует токены;
+#   таймаут curl = $3 секунд); ПЕРЕЗАПИСЬ файла $2 сырым ответом (при ошибке
+#   curl там остаётся частичное/пустое); подпроцессы curl/awk/python3/date;
+#   читает глобалы PORT, TPL_DIR.
+#
+# Ограничения/допущения: сервер должен быть ready (готовность — забота
+#   вызывающего cmd_bench/wait_health); в теле обязателен явный if/return:
+#   bare `cmd || return $?` внутри $( ) под set -e уносит весь скрипт
+#   (комментарий в теле); prompt_tokens отсутствует в usage — python печатает 0.
+#
+# @param 1: string             # путь payload JSON (от bench_payload)
+# @param 2: string             # путь файла сырого ответа (перезаписывается)
+# @param 3: /\d+/              # таймаут curl, целые секунды
+# @stdout /^[\d.]+ \d+ \d+$/   # «wall prompt_tokens completion_tokens»: wall — float (с, 3 знака), прочее — целые
+# @returns integer             # 0 — строка на stdout; 1 — curl без ответа/ошибка; 3 — ответ не JSON; 4 — usage нет (caller: WARN+пропуск)
+bench_req() {
   # ВАЖНО: явный if/return, не 'cmd || return $?' — внутри $( ) с set -e
   # bare-return уносит весь скрипт (bash-семантика выхода из подстановки).
   local pay="$1" resp="$2" to="$3" rc=0 t0 t1
@@ -68,20 +145,69 @@ bench_req() {  # bench_req <payload.json> <resp_file> <timeout> → "wall prompt
   return "$rc"
 }
 
-bench_tau() {  # bench_tau <since_sec> → stdout: tau движка (пусто = нет в логах)
+# Назначение: последний τ движка из логов контейнера за последние $1 секунд
+#   (grep «τ=»/«tau=», tail -1); пустой stdout = данных в логах нет
+#   (best-effort, не выдумываем).
+#
+# Побочные эффекты: подпроцесс podman logs (только чтение логов); в stdout —
+#   значение τ без перевода строки; читает глобал CONTAINER.
+#
+# Ограничения/допущения: $1 — целые секунды «от сейчас»: вызывающие передают
+#   дельту своего start с запасом +2 с; при нескольких τ-строках за окно
+#   берётся последняя.
+#
+# @param 1: /\d+/          # секунд назад (передаётся в podman logs --since)
+# @stdout '' | /^[\d.]+$/  # τ движка либо пустая строка (данных в логах нет)
+# @returns integer         # всегда 0 (grep мимо заглушён «|| true»)
+bench_tau() {
   local tau
   tau=$(podman logs --since "${1}s" "$CONTAINER" 2>&1 | grep -oE "(τ|tau)=[0-9.]+" | tail -1) || true
   printf '%s' "${tau#*=}"
 }
 
-bench_med() {  # bench_med <scenario> <field 1..6> — медиана чисел колонки runs.tsv (пусто = нет)
+# Назначение: медиана чисел колонки $2 сценария $1 по
+#   $BENCH_TMP/runs.tsv (awk-фильтр → sort -g → tpl/awk/bench_med.awk);
+#   пустой stdout = чисел для сценария/колонки нет.
+#
+# Побочные эффекты: чтение $BENCH_TMP/runs.tsv; подпроцессы awk/sort/awk;
+#   в stdout — медиана (printf %.3f, без перевода строки). Ничего не пишет.
+#
+# Ограничения/допущения: пустой/отсутствующий runs.tsv → сразу 0 без вывода;
+#   пустые значения и «-» в колонке в медиану не попадают; глобал BENCH_TMP
+#   (mktemp-каталог cmd_bench) обязателен; колонка 1 — имя сценария, медиана
+#   по ней не считается.
+#
+# @param 1: string        # ключ сценария (колонка 1 runs.tsv)
+# @param 2: /\d+/         # номер колонки 2..6 (2=wall, 3=tokens, 4=tok_s, 5=τ, 6=ttft_ms)
+# @stdout '' | /^[\d.]+$/ # медиана (awk печатает %.3f) либо пусто
+# @returns integer        # всегда 0
+bench_med() {
   [ -s "$BENCH_TMP/runs.tsv" ] || return 0
   awk -F'\t' -v s="$1" -v c="$2" '$1==s && $c!="" && $c!="-" {print $c}' "$BENCH_TMP/runs.tsv" \
     | sort -g \
     | awk -f "$TPL_DIR/awk/bench_med.awk"
 }
 
-bench_solo() {  # bench_solo <scenario> <content_file> <max_tokens> — decode tok/s по usage
+# Назначение: соло-сценарий: RUNS прогонов bench_req (payload из промпта $2 с
+#   max_tokens $3); каждый успешный прогон — строка в runs.tsv: wall,
+#   completion_tokens, tok/s = tokens/wall, τ из логов (колонки 2–5).
+#
+# Побочные эффекты: RUNS РЕАЛЬНЫХ генераций у модели (сеть, токены; таймаут
+#   300 с); ПЕРЕЗАПИСЬ $BENCH_TMP/solo.json (payload) и
+#   $BENCH_TMP/solo_resp (сырой ответ); допись строк в $BENCH_TMP/runs.tsv;
+#   warn-строки в stderr; подпроцессы через bench_payload/bench_req/bench_tau
+#   (curl/awk/python3/date/podman).
+#
+# Ограничения/допущения: сервер ready; файл промпта $2 уже создан вызывающим
+#   cmd_bench (фикстура solo-code — с md5-гейтом); глобалы RUNS, BENCH_TMP,
+#   PORT, CONTAINER, TPL_DIR обязательны; неудачный прогон — WARN и пропуск,
+#   все прогоны неудачны — сценарий просто не попадает в таблицу.
+#
+# @param 1: 'solo-code' | 'solo-prose'  # ключ сценария для колонки 1 runs.tsv
+# @param 2: string                      # путь текстового файла промпта
+# @param 3: /\d+/                       # max_tokens
+# @returns integer                      # всегда 0 (неудачи прогонов — warn, не rc)
+bench_solo() {
   local sc="$1" cf="$2" mt="$3" i out w pt toks tk tau start ok=0
   bench_payload "$BENCH_TMP/solo.json" "$cf" "$mt"
   start=$(date +%s)
@@ -100,7 +226,23 @@ bench_solo() {  # bench_solo <scenario> <content_file> <max_tokens> — decode t
   return 0
 }
 
-bench_ttft() {  # TTFT по streaming-SSE (время до первого content-chunk)
+# Назначение: сценарий ttft: RUNS стриминг-запросов (max_tokens 8, stream=1)
+#   через tpl/python/ttft.py — время до первого content-chunk в миллисекундах;
+#   результат — колонка 6 (ttft_ms) строк runs.tsv.
+#
+# Побочные эффекты: RUNS РЕАЛЬНЫХ стриминг-запросов к модели (сеть, токены;
+#   внутренний таймаут python 120 с); ПЕРЕЗАПИСЬ $BENCH_TMP/ttft.json (payload);
+#   допись строк ttft в $BENCH_TMP/runs.tsv; warn в stderr; подпроцессы
+#   python3/awk/date (через bench_payload).
+#
+# Ограничения/допущения: промпт $BENCH_TMP/c_ttft.txt создаёт заранее
+#   cmd_bench; глобалы RUNS, BENCH_TMP, PORT, TPL_DIR обязательны; python
+#   печатает «null»/«ERR …» при отсутствии content или сетевой ошибке —
+#   такой прогон идёт WARN и пропускается; таймаут 120 с зашит в python и
+#   не параметризован.
+#
+# @returns integer # всегда 0 (неудачи прогонов — warn, не rc)
+bench_ttft() {
   local i ttft ok=0
   bench_payload "$BENCH_TMP/ttft.json" "$BENCH_TMP/c_ttft.txt" 8 1
   for i in $(seq 1 "$RUNS"); do
@@ -116,7 +258,25 @@ bench_ttft() {  # TTFT по streaming-SSE (время до первого conten
   return 0
 }
 
-bench_prefill() {  # ~100K токенов фикстуры; prefill tok/s = prompt_tokens/wall
+# Назначение: сценарий prefill-100k: развёртка кодовой фикстуры до ~100K
+#   токенов (tpl/python/prefill_gen.py, оценка 4 симв/ток), RUNS запросов с
+#   max_tokens 16; в runs.tsv колонка 3 = usage.prompt_tokens, колонка 4 =
+#   prompt_tokens/(wall − время decode-16-ток при известной MED_SOLO_CODE).
+#
+# Побочные эффекты: RUNS РЕАЛЬНЫХ префилл-запросов ~100K токенов (сеть,
+#   дорого по вычислению и времени; таймаут 600 с; генерация минимальна —
+#   16 токенов); запись $BENCH_TMP/c_prefill.txt, ПЕРЕЗАПИСЬ prefill.json/
+#   prefill_resp; допись строк prefill-100k в runs.tsv; log/warn-строки;
+#   подпроцессы python3/awk/date/podman (через bench_req/bench_tau).
+#
+# Ограничения/допущения: сервер ready; требует $BENCH_TMP/c_code.txt
+#   (md5-фикстура, создаёт cmd_bench) и глобалы RUNS, BENCH_TMP, PORT,
+#   CONTAINER; MED_SOLO_CODE опционален: пуст → decode не вычитается
+#   (пояснение cmd_bench пишет в B_NOTE_prefill_100k); max_tokens 16
+#   фиксирован по дизайну сценария.
+#
+# @returns integer # всегда 0 (неудачи прогонов — warn, не rc)
+bench_prefill() {
   local i out w pt toks dec we rate ok=0
   python3 "$TPL_DIR/python/prefill_gen.py" "$BENCH_TMP/c_code.txt" "$BENCH_TMP/c_prefill.txt"
   log "prefill-100k: промпт ~$(( $(wc -c < "$BENCH_TMP/c_prefill.txt") / 4 )) tok (оценка 4 симв/ток; факт — usage.prompt_tokens)"
@@ -141,7 +301,22 @@ bench_prefill() {  # ~100K токенов фикстуры; prefill tok/s = prom
   return 0
 }
 
-bench_longgen() {  # 4096 tok decode + стабильность (первая/последняя tok/s= из логов, best-effort)
+# Назначение: сценарий long-gen: RUNS генераций по 4096 токенов (таймаут
+#   600 с); стабильность движка «первая → последняя tok/s» из логов за прогон
+#   (best-effort) — в экспорт B_NOTE_long_gen для таблицы отчётника.
+#
+# Побочные эффекты: RUNS РЕАЛЬНЫХ длинных генераций (сеть, много токенов,
+#   минуты времени); ПЕРЕЗАПИСЬ $BENCH_TMP/long.json и long_resp; допись
+#   строк long-gen в runs.tsv; подпроцессы podman logs + grep/cut/sed/tail;
+#   EXPORT глобала B_NOTE_long_gen; warn в stderr.
+#
+# Ограничения/допущения: сервер ready; требует $BENCH_TMP/c_long.txt (создаёт
+#   cmd_bench) и глобалы RUNS, BENCH_TMP, PORT, CONTAINER, TPL_DIR; нет
+#   tok/s-строк в логах → note «движковый tok/s в логах нет», не ошибка;
+#   движковые tok/s — только заметка таблицы, в runs.tsv не попадает.
+#
+# @returns integer # всегда 0 (неудачи прогонов — warn, не rc)
+bench_longgen() {
   local i out w pt toks tk ok=0 first last vals start
   bench_payload "$BENCH_TMP/long.json" "$BENCH_TMP/c_long.txt" 4096
   start=$(date +%s)
@@ -168,7 +343,31 @@ bench_longgen() {  # 4096 tok decode + стабильность (первая/п
   return 0
 }
 
-bench_parallel() {  # bench_parallel <N> — N одновременных curl; aggregate + интерпретация по роуту
+# Назначение: сценарий parallel-N: N одновременных curl (чередование
+#   проза/код, max_tokens 300); в runs.tsv строка parallel-$n: wall всего
+#   батча, Σ completion_tokens, aggregate tok/s; в stdout — интерпретация по
+#   роуту (lanes: aggregate/solo в %; multi-slot: очередь слотов; иначе:
+#   FIFO «aggregate ≈ solo»), per-request wall — в экспорт
+#   B_NOTE_parallel_$n.
+#
+# Побочные эффекты: N РЕАЛЬНЫХ параллельных генераций (сеть, токены; таймаут
+#   300 с на запрос, N параллельных subshell'ов curl+date+awk); удаляет
+#   старые $BENCH_TMP/par_resp_* и par_wall_*, пишет par$i.json,
+#   par_resp_$i, par_wall_$i; допись parallel-$n в runs.tsv; EXPORT
+#   B_NOTE_parallel_$n; строки интерпретации в stdout, warn в stderr;
+#   подпроцессы python3 (par_usage.py), awk, curl, date; читает глобалы
+#   ROUTE, MED_SOLO_CODE, BENCH_TMP, TPL_DIR (через bench_med/bench_slots).
+#
+# Ограничения/допущения: сервер ready; требует $BENCH_TMP/c_prose.txt и
+#   c_code.txt (создаёт cmd_bench) и глобалы ROUTE (интерпретация),
+#   BENCH_TMP, PORT; MED_SOLO_CODE опционален — без него процент
+#   масштабирования не считается; запрос без ответа/usage — warn и вне суммы;
+#   нулевая сумма — сценарий пропущен (всё равно 0); интерпретация зовёт
+#   bench_slots (ещё один GET /health) на multi-slot.
+#
+# @param 1: /\d+/      # N — число одновременных запросов (вызывающие дают 2 и 4)
+# @returns integer     # всегда 0 (частичные неудачи — warn, не rc)
+bench_parallel() {
   local n="$1" i t0 t1 tw sum tk fails=0 pw=""
   for i in $(seq 1 "$n"); do
     if [ $((i % 2)) = 1 ]; then
@@ -227,7 +426,26 @@ bench_parallel() {  # bench_parallel <N> — N одновременных curl; 
   return 0
 }
 
-bench_hol() {  # длинный в фоне, через 2 c короткий; мера wall короткого vs сольный референс
+# Назначение: сценарий hol (head-of-line): длинный запрос (800 токенов) в
+#   фоне, через 2 с короткий (8 токенов); wall короткого — строка runs.tsv;
+#   отдельно снятый сольный референс короткого (вне таблицы) — глобал
+#   BENCH_HOL_REF, по нему cmd_bench считает % изоляции (tpl/awk/hol_note.awk).
+#
+# Побочные эффекты: 2 РЕАЛЬНЫХ запроса за прогон (длинный — фоновый curl с
+#   таймаутом 600 с, короткий — через bench_req с таймаутом 120 с) +
+#   background curl subshell, sleep 2; ПЕРЕЗАПИСЬ $BENCH_TMP/hol_long.json,
+#   hol_short.json и hol_*_resp-файлов; допись строк hol в runs.tsv (wall
+#   короткого — колонка 2); присваивание глобала BENCH_HOL_REF ('' — сольный
+#   референс не удался); warn в stderr.
+#
+# Ограничения/допущения: сервер ready; требует $BENCH_TMP/c_long.txt и
+#   c_ttft.txt (создаёт cmd_bench) и глобалы RUNS, BENCH_TMP, PORT; длинный
+#   доигрывает wait'ом до следующего прогона (его rc проигнорирован); смысл
+#   цифр зависит от ROUTE: FIFO — короткий ждёт длинный целиком, slots/lanes
+#   дают изоляцию; сольный референс в runs.tsv НЕ пишется.
+#
+# @returns integer # всегда 0 (неудачи прогонов — warn, не rc)
+bench_hol() {
   local i out ok=0 ref_w="" w0 lpid
   bench_payload "$BENCH_TMP/hol_long.json" "$BENCH_TMP/c_long.txt" 800
   bench_payload "$BENCH_TMP/hol_short.json" "$BENCH_TMP/c_ttft.txt" 8
@@ -255,6 +473,50 @@ bench_hol() {  # длинный в фоне, через 2 c короткий; м
   return 0
 }
 
+# Назначение: `hfctl bench` — локальный бенч производительности живого
+#   сервера: фикстуры + md5-гейт → health (с --fresh — recreate+wait_health)
+#   → прогрев → сценарии (quick: solo-code, solo-prose, ttft; full: ещё
+#   prefill-100k, long-gen, parallel 2/4, HOL; ar-baseline печатается
+#   пропущенным) → артефакт JSON, таблица (bench_report.py report) и дельта
+#   --compare.
+#
+# Побочные эффекты:
+#   Файлы: mktemp-каталог BENCH_TMP с trap 'rm -rf' на EXIT (runs.tsv,
+#     payload-*.json, *_resp, c_*.txt, artifact.json); артефакт
+#     $OUT/<timestamp>.json (default $STACK_DIR/bench-runs, mkdir -p) —
+#     база будущих --compare; копирование фикстуры tpl/bench в c_code.txt
+#     (байты-в-байты, md5-гейт — warn при несовпадении, НЕ die) и трёх
+#     ad-hoc промптов (prose/ttft/long/warm); чтение .env через env_val
+#     (HIPFIRE_PORT/HIPFIRE_BIND переопределяют глобалы PORT/BIND,
+#     HIPFIRE_IMAGE уходит в артефакт).
+#   Сеть/сервер: РЕАЛЬНЫЕ генерации — прогрев + (quick) 2×RUNS генераций и
+#     RUNS стримингов; (full) ещё RUNS×(prefill ~100K токенов, long-gen
+#     4096 токенов, параллельные 2+4 за батч, HOL-пары); GET /health +
+#     wait_health 900 при незавершенной загрузке модели; с --fresh —
+#     compose up -d --force-recreate (ЕДИНСТВЕННЫЙ режим, трогающий сервер)
+#     и повторный wait_health 900.
+#   Глобалы/окружение: RUNS, OUT, ROUTE, BENCH_TMP, MED_SOLO_CODE,
+#     BENCH_HOL_REF; EXPORT B_RUNS/B_TS/B_PROFILE/B_MODEL/B_ROUTE/B_IMAGE/
+#     B_MD5/B_FULL и B_NOTE_* (контракт python-отчётника bench_report.py);
+#     при --json перенаправление fd: человеческий вывод в stderr, JSON
+#     артефакта в исходный stdout через fd 4.
+#
+# Ограничения/допущения: стек установлен (.env — иначе die) и сервер отвечает
+#   (die при отказе GET /health); модель ждём до готовности (до 900 с);
+#   конфиг сервера НЕ меняется (ar-baseline — пропуск, сравнение рук через
+#   'hfctl use'); фикстуру не редактировать: md5 ≠ BENCH_FIXTURE_MD5 → warn;
+#   все запросы идут через bench_payload (temperature 0, reasoning_effort
+#   none — защита коротких max_tokens от thinking-бюджета); неизвестный флаг
+#   или --runs вне 1–20 → die (процесс завершается, функция не
+#   возвращается); --compare без файла берёт свежайший json $OUT ДО записи
+#   текущего артефакта. Локалы одной строкой: mode — 'quick' | 'full',
+#   runs — целое 1–20, json_out/fresh — '0' | '1', out_dir/compare — пути
+#   ('' — не задан; compare «auto» — режим автовыбора бейслайна).
+#
+# @param 1..N: string[]           # режим и флаги: 'quick' | 'full' (default quick),
+#   --runs <целое 1–20> (default 3), --out <каталог>, --json,
+#   --compare [<файл>] (default свежайший json в --out), --fresh, --help
+# @returns integer                # всегда 0 при возврате — отказы завершают процесс через die
 cmd_bench() {
   local mode="quick" runs=3 out_dir="" json_out=0 compare="" fresh=0
   while [ $# -gt 0 ]; do

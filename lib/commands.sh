@@ -1,5 +1,45 @@
 # shellcheck shell=bash
 # ── подкоманды: install/use/status/logs/watch/doctor/models/pull/uninstall ──
+
+# Назначение: `hfctl install` — полная установка/обновление стека на голом
+#   Ubuntu/Debian: миграции → RAM-гейт → префлайт хоста → файлы стека →
+#   образ и модели → конфиг профиля → recreate → health → смоук → роут →
+#   автозапуск. Идемпотентен (повтор = донастройка поверх существующего).
+#
+# Побочные эффекты (по фазам):
+#   Миграции/чтение: v1-.env без HFCTL_PROFILE — старая модель/порт/bind/
+#     база моделей сохраняются в глобалы (MODEL_DEFAULT/PORT/BIND/
+#     MODELS_BASE); migrate_models — mv плоских файлов $MODELS_BASE в сеты;
+#     migrate_state — cp -a legacy-вольюмов в пустой profiles/<prof>/.
+#   Хост (preflight, sudo точечно): apt podman/podman-compose/curl,
+#     usermod -aG render, limits.d memlock-файл, enable-linger; exit 42 при
+#     свежей группе/лимитах (нужен перезаход/ребут).
+#   Файлы: write_stack_files — дерево hfctl (бинарь+lib/+tpl/) в $STACK_DIR,
+#     симлинк ~/.local/bin/hfctl, compose-тройка + compose.local.yml;
+#     write_env — ПЕРЕЗАПИСЬ .env канона профиля.
+#   Обвес движка: podman pull образа (если нет локально); pull_profile_models
+#     — сет моделей + draft в активный $MODELS_DIR; compose up -d;
+#     apply_profile — cfgset в config.toml профиля; `up -d
+#     --force-recreate` (движок перечитывает конфиг только на recreate);
+#     wait_health 900 + smoke (2 реальных запроса генерации) + check_route.
+#   Финал: cmd_autostart (юниты systemd-user + watchdog-таймер + linger)
+#     если не --no-autostart; в stdout — логи фаз, тело /health,
+#     смоук-ответы, роут и usage-справка.
+#
+# Ограничения/допущения: порядок фаз фиксирован (RAM-гейт ДО любого
+#   скачивания — spec §6). Неизвестный флаг или профиль → die (exit 1).
+#   Env-входы: HFCTL_MODEL — модель по умолчанию поверх профиля;
+#   HFCTL_FORCE=1 или --force — FORCE_GATE=1 (обход RAM-гейта с warn);
+#   HFCTL_YES=1 или --yes — неинтерактив. Локалы одной строкой:
+#   prof — алиас профиля из --profile ('' → PROFILE_DEFAULT);
+#   no_autostart/set_port/set_bind/set_models/force — '0' | '1'.
+#   exit 42 из preflight прерывает процесс до записи .env.
+#
+# @param 1..N: string[] # флаги (все опциональны): --profile <алиас> |
+#   --port <целое> (default 11435) | --bind <адрес> (default 0.0.0.0) |
+#   --models-dir <путь> | --no-autostart | --force | --yes
+# @returns integer      # всегда 0 при возврате — отказы завершают процесс:
+#   die/profile_gate (1), preflight (42), сбои шагов (set -e)
 cmd_install() {
   local prof="" no_autostart=0 set_port=0 set_bind=0 set_models=0 force=0
   while [ $# -gt 0 ]; do
@@ -68,6 +108,35 @@ cmd_install() {
 EOF
 }
 
+# Назначение: `hfctl use <profile>` — переключить профиль ЖИВОГО стека:
+#   RAM-гейт → докачка сета → .env канона → конфиг движка → recreate →
+#   health → смоук → роут; при неподошедшем профиле — откат канона.
+#
+# Побочные эффекты (по фазам): profile_gate (отказ — exit 1 ДО скачивания);
+#   migrate_models + set_models_dir — раскладка по сетам и перестановка
+#   глобала MODELS_DIR на сет профиля (нестандартная база из старого .env
+#   уважается, сет — новый); preflight (sudo точечно, exit 42);
+#   migrate_state (cp -a legacy-вольюмов в profiles/<p>); pull_profile_models
+#   — докачка недостающих моделей/драфта; write_env — ПЕРЕЗАПИСЬ .env
+#   (HFCTL_PROFILE=новый, порт/bind из прежнего .env); compose up -d +
+#   apply_profile (cfgset) + `up -d --force-recreate`. Откатная ветка
+#   (wait_health 600 не прошёл): warn + set_models_dir на сет прежнего
+#   профиля + write_env(prev_prof, prev_model) — конфиг движка НОВЫМ
+#   профилем уже записан и не откатывается; rc 1. Успех: smoke +
+#   check_route; юниты автозапуска НЕ переписываются — канон профиля
+#   читается из .env при boot/watchdog («переживёт рестарт»).
+#
+# Ограничения/допущения: стек должен быть установлен (.env есть — иначе
+#   die); файл стека write_stack_files НЕ пересоздаёт (в отличие от
+#   install). Env-входы: HFCTL_MODEL — модель по умолчанию; HFCTL_FORCE=1
+#   или --force — обход RAM-гейта. Локалы: p — алиас/канон профиля
+#   (resolve_profile); force — '0' | '1'; prev_prof/prev_model — снимок до
+#   смены (для отката, verbatim cur_profile/cur_model); v/mb — строки из
+#   .env ('' — ключа нет).
+#
+# @param 1..N: string[] # <алиас|id профиля> в любом порядке с опциональным
+#   --force (обход RAM-гейта); прочий флаг → die
+# @returns integer      # 0 — профиль активен; 1 — откат (сервер не поднялся, канон .env возвращён)
 cmd_use() {
   local p="${1:-}" force=0
   while [ $# -gt 0 ]; do
@@ -120,6 +189,26 @@ cmd_use() {
   log "профиль $p активен (конфиг автозапуска обновлён — переживёт рестарт)"
 }
 
+# Назначение: `hfctl status [--json]` — сводка состояния: профиль,
+#   автозапуск/вотчдог, health сервера, список контейнеров; --json — тот же
+#   снимок машиночитаемо.
+#
+# Побочные эффекты: только чтение и отчёт в stdout — systemctl --user
+#   is-enabled юнита и вотчдог-таймера (отсутствие считается «disabled»),
+#   curl GET /health (5 с таймаут, отказ → пустое тело), python3-рендер
+#   (status_json.py в JSON-режиме, status_hline.py в текстовом), podman ps
+#   -a по фильтру hipfire. Файлов и стека не меняет.
+#
+# Ограничения/допущения: требует глобалы PORT, UNIT_NAME, TPL_DIR
+#   (диспетчер) и cur_profile (stack.sh). Флаг сверяется только по $1 —
+#   лишние аргументы молча игнорируются. Локалы: json — '0' | '1';
+#   prof/auto/wdog — строки (auto/wdog: 'enabled' | 'disabled'); body —
+#   тело /health ('' — сервер не отвечает); hline — health-строка с
+#   заглушкой «health: сервер не отвечает».
+#
+# @param 1: '--json'    # опциональный флаг JSON-вывода (default — текстовый отчёт)
+# @stdout string        # текстовая сводка или JSON (status_json.py) — по флагу
+# @returns integer      # текстовый режим — всегда 0 (финальный echo); JSON — rc python3
 cmd_status() {
   local json=0; [ "${1:-}" = "--json" ] && json=1
   local prof auto wdog body
@@ -140,6 +229,22 @@ cmd_status() {
   echo "(живой наблюдатель запросов: hfctl watch)"
 }
 
+# Назначение: `hfctl logs [-f] [-n N]` — логи контейнера сервера с метками
+#   времени (podman logs -t, stderr слит в stdout).
+#
+# Побочные эффекты: подпроцесс podman logs (последние n строк
+#   hipfire_hipfire_1 в stdout); с -f — не возвращается (follow до сигнала).
+#   Файлов и стека не касается.
+#
+# Ограничения/допущения: требует глобал CONTAINER (диспетчер). Разбор
+#   флагов positional-независимый: -f — follow; '-n' отдельно, '-nN' или
+#   голое число — размер хвоста. Локалы: n — целое число строк (default 80,
+#   из аргумента вида [0-9]*); follow — '' или '-f' (unquoted-раскрытие в
+#   команду podman). Неизвестный аргумент → die (exit 1).
+#
+# @param 1..N: string[] # флаги: -f (follow) | -n N | -nN | N (хвост в строках, default 80)
+# @stdout string        # последние n строк логов контейнера с timestamp'ами
+# @returns integer      # rc podman logs (при -f — rc на выходе по сигналу)
 cmd_logs() {
   local n=80 follow="" a
   for a in "$@"; do
@@ -154,7 +259,23 @@ cmd_logs() {
   podman logs $follow -t --tail "$n" "$CONTAINER" 2>&1
 }
 
-gpu_temp() {  # °C самой горячей AMD-карты ('' если не видно); чтение /sys — на хосте
+# Назначение: °C самой горячей AMD-карты (vendor 0x1002) — максимум по
+#   temp1_input всех её hwmon-датчиков; чтение /sys — на хосте (в
+#   контейнере этих файлов нет).
+#
+# Побочные эффекты: только печать числа в stdout; читает
+#   /sys/class/drm/card*/device/{vendor,hwmon/hwmon*/temp1_input}; ничего
+#   не меняет.
+#
+# Ограничения/допущения: без параметров. Локалы одной строкой: card/hw —
+#   пути /sys; v — строка vendor ('' при нечитаемом файле); t/max —
+#   миллиградусы целыми ('' — датчик ещё не найден; нечисловые чтения
+#   пропускаются). Без доступных AMD-датчиков — пустой stdout и rc 1
+#   (вызывающий cmd_watch глушит это `|| true`).
+#
+# @stdout integer   # целые °C (максимум/1000 вниз); пусто — карта/датчик не видны
+# @returns integer  # 0 — число напечатано; 1 — ни одного датчика не найдено
+gpu_temp() {
   local card hw v t max=""
   for card in /sys/class/drm/card[0-9]*; do
     [ -r "$card/device/vendor" ] || continue
@@ -169,8 +290,29 @@ gpu_temp() {  # °C самой горячей AMD-карты ('' если не �
   [ -n "$max" ] && echo "$((max / 1000))"
 }
 
-cmd_watch() {  # живой наблюдатель обработки: /stats + /metrics + температура GPU
-  # («агент работает, а в логах тишина» — очередь и виден факт обработки).
+# Назначение: `hfctl watch [--interval N]` — живой наблюдатель обработки:
+#   /stats + /metrics + температура GPU («агент работает, а в логах
+#   тишина» — очередь и виден факт обработки).
+#
+# Побочные эффекты: бесконечный цикл тиков — на каждый: curl GET /stats и
+#   /metrics (по 3 с таймаут), python3 (watch_stats.py) и awk для разбора,
+#   gpu_temp (чтение /sys), sleep interval; строки событий и heartbeat в
+#   stdout. Файлов и состояния стека не меняет.
+#
+# Ограничения/допущения: требует глобалы PORT, TPL_DIR (диспетчер), isint
+#   и gpu_temp этого файла. Интервал — целое ≥ 1 с (иначе die, exit 1);
+#   обе формы: --interval N и --interval=N. Локалы: interval — целые
+#   секунды (default 2); now/last_print/last_down — unix-время (last_down
+#   -999 = сервер ещё не «падал»); q/served/recent/retries/cache/fails и
+#   prev_* — числа строками либо '-'/'' когда данных нет; prev_* при
+#   недоступности сервера сбрасываются в '' (после поднятия печатается
+#   свежая строка без ложных дельт). read из python заглушён `|| true`:
+#   при пустом выводе счётчики остаются '-'.
+#
+# @param 1..N: string[] # флаги: --interval N | --interval=N (default 2 с, целое ≥ 1)
+# @stdout string        # строки событий (очередь/обслужено/кэш/done tok-s/ошибки/GPU) и heartbeat простоя
+# @returns integer      # не возвращается — вечный цикл; ошибки аргументов: die (exit 1)
+cmd_watch() {
   # Философия тихого стриминга: строка только на ИЗМЕНЕНИИ видимых счётчиков,
   # в простое — heartbeat раз в 60 c; недоступность — каждые 30 c, самолечение.
   local usage="использование: hfctl watch [--interval N]" interval=2
@@ -248,14 +390,53 @@ cmd_watch() {  # живой наблюдатель обработки: /stats + 
   done
 }
 
-# скрытый алиас совместимости: mode single|slots [N] == use 27b-*
+# Назначение: скрытый алиас совместимости `hfctl mode single|slots [N]` ==
+#   `hfctl use 27b-*`; N — число слотов, пишется в глобал SLOTS (его читает
+#   apply_profile в ветке 27b-slots).
+#
+# Побочные эффекты: перезапись глобала SLOTS значением $2 (если задан);
+#   далее — всё, что делает cmd_use для переданного алиаса (RAM-гейт →
+#   докачка сета → .env → конфиг → recreate → health → смоук → роут);
+#   проброс --force из mode не предусмотрен (флаг-позиционный разбор cmd_use
+#   сюда не доходит — передаётся только "$m").
+#
+# Ограничения/допущения: требует глобал SLOTS (диспетчер) и cmd_use этого
+#   файла. Пустой $1 → die (exit 1). Локал m — алиас/id профиля КАК ЕСТЬ
+#   (алиасы single|slots раскрывает resolve_profile внутри cmd_use);
+#   нечисловое $2 проходит в SLOTS без валидации и всплывёт в cfgset.
+#
+# @param 1: string    # алиас профиля (живые: single | slots) или его канонический id
+# @param 2: /\d+/     # опционально: число слотов → глобал SLOTS (default — HFCTL_SLOTS/2)
+# @returns integer    # как у cmd_use: 0 — профиль активен; 1 — откат канона
 cmd_mode() {
   local m="${1:-}"; [ -n "$m" ] || die "использование: hfctl mode single|slots [N]"
   [ -n "${2:-}" ] && SLOTS="$2"
   cmd_use "$m"
 }
 
-cmd_doctor() {  # диагностика без изменений (spec §3): gейты + что мешает
+# Назначение: `hfctl doctor` — диагностика БЕЗ изменений (spec §3): ОС,
+#   память, GPU-ноды, RAM-гейт по всем профилям, установка/state, окружение
+#   (podman/render/limits.d), gpu-lock-и, health.
+#
+# Побочные эффекты: только чтение и печать (stdout, warn в stderr):
+#   /etc/os-release, /proc/meminfo, наличие /dev/kfd и /dev/dri/renderD*,
+#   таблица профилей (RAM-гейт по каждому), .env (cur_profile/cur_model),
+#   state-каталоги профиля, podman volume exists (legacy-вольюмы),
+#   podman --version, id -nG, limits.d-файл, fuser по
+#   /run/lock/hipfire/gpu-pci-*.lock, curl GET /health (первые 200 байт).
+#   Ничего не создаёт, не удаляет, sudo не зовёт.
+#
+# Ограничения/допущения: требует глобалы STACK_DIR, STATE_BASE, PORT,
+#   PROFILE_LIST (диспетчер) и warn/ram_pool_gib/profile_field/cur_profile/
+#   cur_model. Локалы: have/need — целые GiB; sd/lim/lockdir —
+#   фиксированные пути; f — путь lock-файла из glob; p — перебор
+#   PROFILE_LIST. Чужой держатель gpu-lock — предупреждение (второй serve
+#   не стартует), не ошибка возврата; `. /etc/os-release` засоряет окружение
+#   переменными ОС (штатно для diagnosis-only).
+#
+# @stdout string   # текстовая диагностика секциями («── система ──» … «── health ──»)
+# @returns integer # всегда 0 — финальный echo; отказы чтений заглушены ветками «НЕТ»
+cmd_doctor() {
   local have; have=$(ram_pool_gib)
   echo "── система ──"
   . /etc/os-release && echo "ОС: $PRETTY_NAME"
@@ -309,7 +490,24 @@ cmd_doctor() {  # диагностика без изменений (spec §3): g
   echo
 }
 
-cmd_models() {  # что скачано и что требует каждый профиль (spec §3)
+# Назначение: `hfctl models` — что скачано по сетам в $MODELS_BASE и что
+#   требует каждый профиль (spec §3); плюс напоминание про изоляцию сетов.
+#
+# Побочные эффекты: только чтение и печать в stdout: du -sh каталогов
+#   сетов ('27b' | 'flash') в $MODELS_BASE, /proc/meminfo (ram_pool_gib),
+#   таблица профилей (поле 4 — порог гейта), model_set по каждому id.
+#   Файлов не касается.
+#
+# Ограничения/допущения: требует глобалы MODELS_BASE, PROFILE_LIST
+#   (диспетчер) и ram_pool_gib/profile_field/model_set. Локалы: s —
+#   перебор имён сетов; total — человекочитаемый размер du ('' при
+#   недоступном du); p — перебор PROFILE_LIST; have/need — целые GiB;
+#   avail — 'доступен' | 'НЕДОСТУПЕН …'. Порог здесь тот же (поле 4), что у
+#   profile_gate, но без учёта force-обхода.
+#
+# @stdout string   # размеры сетов + строка доступности на каждый профиль + итог про изоляцию
+# @returns integer # всегда 0 — финальный echo; нет каталога — штатная заглушка-строка
+cmd_models() {
   echo "── на диске (по сетам профилей, в $MODELS_BASE) ──"
   local s total
   for s in 27b flash; do
@@ -331,7 +529,24 @@ cmd_models() {  # что скачано и что требует каждый п
   echo "чужого сета получит 404 (молчаливый swap невозможен)"
 }
 
-cmd_pull() {  # hfctl pull <profile> — скачать сет модели БЕЗ переключения
+# Назначение: `hfctl pull <profile>` — скачать сет моделей профиля БЕЗ
+#   переключения (прогрев/бэкап-сет на слабой машине легален).
+#
+# Побочные эффекты: mkdir -p базы $MODELS_BASE и каталога целевого сета;
+#   migrate_models (mv плоских файлов в сеты); pull_profile_models с
+#   env-префиксом MODELS_DIR=целевой сет (глобал MODELS_DIR НЕ сдвигается)
+#   — подтяжка образа и докачка недостающих моделей/драфта по сети; log и
+#   две итоговые строки в stdout. .env, конфиг движка, контейнеры и
+#   автозапуск НЕ трогаются.
+#
+# Ограничения/допущения: стек должен быть установлен (.env есть — иначе
+#   die, exit 1); RAM-гейт НЕ применяется — скачивание ≠ запуск, ёмкость
+#   оценивается при use. Локалы: p — алиас/id после resolve_profile (пустой
+#   или неизвестный → die); target — путь каталога-сета назначения.
+#
+# @param 1: string      # алиас или канонический id профиля (нормализует resolve_profile)
+# @returns integer      # всегда 0 при возврате — die (exit 1) и сетевые сбои pull завершают процесс (set -e)
+cmd_pull() {
   local p="${1:-}"
   [ -n "$p" ] || die "использование: hfctl pull <profile> (${PROFILE_LIST// /|})"
   p=$(resolve_profile "$p") || die "неизвестный профиль '$p' (доступны: $PROFILE_LIST)"
@@ -347,6 +562,35 @@ cmd_pull() {  # hfctl pull <profile> — скачать сет модели БЕ
   echo "(активация — 'hfctl use $p'; RAM-гейт оценивается при use)"
 }
 
+# Назначение: `hfctl uninstall` — снять стек: контейнеры и сеть проекта,
+#   state-каталоги и файлы стека, юниты автозапуска и limits.d; модели и
+#   образ удаляются только по явным флагам.
+#
+# Побочные эффекты (по порядку): подтверждение ask (не-TTY или без --yes —
+#   авто-нет → «отменено», exit 0 без изменений); cmd_off || true (стоп
+#   контейнеров, маркер остановки, юниты ~/.config/systemd/user/* удалены,
+#   daemon-reload, linger off); compose down (контейнеры + сеть проекта);
+#   podman volume rm legacy-вольюмов hipfire_hipfire-config/-kernels.
+#   Границы rm -rf: $STACK_DIR ЦЕЛИКОМ (бинарь hfctl, lib/, tpl/,
+#   compose-файлы, .env, модели и state по путям по умолчанию), поэтому при
+#   сохранении моделей база УВОЗИТСЯ целиком (mv $MODELS_BASE →
+#   $STACK_DIR.hfctl-models-$$, возврат после rm) — иначе сносились бы чужие
+#   сеты; с --purge-models база не увозится и уходит вместе со стеком.
+#   Далее: sudo rm /etc/security/limits.d/99-hipfire-memlock.conf (если
+#   есть); с --purge-image — podman rmi образа (отказ заглушён). Итог
+#   «uninstall DONE». Не трогаем: podman, группу render, чужие каталоги.
+#
+# Ограничения/допущения: по умолчанию STATE_BASE/MODELS_BASE лежат внутри
+#   $STACK_DIR и удаляются вместе с ним; кастомные пути вне стека rm -rf
+#   стека не достанет (вывоз базы при сохранении делает это явно). Локалы
+#   purge_models/purge_image — '0' | '1'; keep — ГЛОБАЛ (local объявить
+#   забыто): путь-временя вывезенной базы либо ''. Сбои остановки/снятия
+#   вешает на `|| true` (uninstall доходит до конца); незащищённые sudo rm
+#   и mv завершают процесс по set -e. Неинтерактив без --yes — штатный
+#   отказ (ask авто-нет).
+#
+# @param 1..N: string[] # флаги (все опциональны): --purge-models | --purge-image | --yes
+# @returns integer      # всегда 0 при возврате («uninstall DONE»); отказ по вопросу — exit 0
 cmd_uninstall() {
   local purge_models=0 purge_image=0
   while [ $# -gt 0 ]; do
