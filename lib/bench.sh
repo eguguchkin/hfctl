@@ -41,11 +41,12 @@ EOF
 }
 
 # Назначение: фактический роут обслуживания в enum артефакта bench — из
-#   общего снимка route_snapshot (health.sh): для flash-multi — наличие
-#   staged-строки lanes (lanes / serial-fallback), для 27b-slots —
-#   «multi-slot» статически (константа артефакта --compare; live-режим слотов
-#   печатается отдельно через bench_slots по /health), иначе — последнее
-#   «spec: …» в логах (singleton-dflash) либо serial.
+#   общего снимка route_snapshot (health.sh): для flash-multi — принятый
+#   ROUTE_STAGED (снимок уже снимает его при свежем отказе lanes →
+#   serial-fallback), для 27b-slots — «multi-slot» статически (константа
+#   артефакта --compare; live-режим слотов печатается отдельно через
+#   bench_slots по /health), иначе — последнее «spec: …» в логах
+#   (singleton-dflash) либо serial.
 #
 # Побочные эффекты: через route_snapshot — podman logs / curl / python3
 #   (ошибка логов = пустые поля снимка, не отказ); в stdout — одна строка

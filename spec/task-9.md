@@ -684,6 +684,82 @@ hflab-доки.
   (пре-existed до этапа 9, не трогал). Если чинить — отдельной задачей с
   решением, должен ли флаг переопределять канон.
 
+## Round 1 (2026-11-11): окно логов предиката роута (triage `impl`, внешняя приёмка EXP-005)
+
+- Date / round: 2026-11-11, фикс-раунд 1 к DoD 6а. Дефект унаследованный (со
+  старого `bench_route` на `638df18`, переехал в `route_snapshot` дословно), но
+  бьёт по текущему контракту DoD 6а и по честности вывода: на долгоживущем
+  контейнере строка `fn-lanes staged: …` (печатается только при загрузке
+  модели) выпадает из окна `podman logs --tail 400`, и живой сервер с
+  ПРИНЯТЫМИ 4 fn-lanes показывал `роут: singleton (serial)` /
+  `"route": "serial-fallback"`. Коммит фикса — HEAD этого коммита (hash
+  фиксирует оркестратор в history.md).
+
+### What was done
+
+- `lib/health.sh::route_snapshot` — предикаты читают **лог целиком потоково**
+  (`podman logs "$CONTAINER" 2>&1 | grep … | tail -1`, без `--tail`), по
+  полному проходу на предикат (staged/refused/spec); буфер `ROUTE_LOG` удалён
+  (grep по дереву: потребителей у него не было — только внутренние грипы
+  самой функции; `ROUTE_HEALTH` не тронут). Позиции staged/refused — из
+  `grep -n` (префикс «NN:», снятие «${s#*:}», сравнение «${s%%:*} -lt …»):
+  **свежий `refused` строкой ниже принятого `staged` обнуляет `ROUTE_STAGED`**
+  (реализация «кто последний сказал в логах, тот и роут» внутри снимка);
+  наоборот — lanes сохраняется. Тексты вывода `check_route` и enum
+  `bench_route` — не менялись. `shortcut:`-комментарий о цене полного прохода
+  (~0.4 с на 7k строк живой машины) и апгрейде (окно `--since` от старта
+  контейнера / поле роута в `/health`) — в теле функции.
+- Docblock'и (единственные правки комментариев): `route_snapshot` —
+  «Побочные» (полный стрим, три прохода; из ПИШЕМЫХ глобалов убран
+  `ROUTE_LOG`) и «Ограничения» (семантика `ROUTE_STAGED` = последнее staged-
+  совпадение, ОБНУЛЁННОЕ свежим отказом ниже; механизм `grep -n`);
+  `check_route` — «Ограничения»: приоритет решает снимок (staged уже снят
+  свежим отказом), далее staged → refused → «данных нет»; `bench_route`
+  (lib/bench.sh) — «Назначение»: flash-multi ветка читает принятый
+  `ROUTE_STAGED`, а не «наличие строки».
+- `spec/hfctl.md` §13 «Единый предикат роута» — контракт окна логов: полный
+  стрим без `--tail` (с обоснованием), приоритет последней реплики.
+- Харнес (носитель `hflab/.local-analysis/task9-exp/`): `route_matrix.sh` —
+  stub podman эмулирует `--tail N` (`tail -N` фикстуры; раньше `cat` — окно не
+  воспроизводилось), список фикстур +3: `staged-old.log` (7006 строк, staged
+  на позиции 3553 — как на живой машине), `staged-refused.log`,
+  `refused-staged.log`; копия синхронизирована в `$S9/test9/`.
+
+### How it was checked internally
+
+| Проверка | Результат |
+|---|---|
+| baseline HEAD `18a546e` (до фикса, stub с эмуляцией `--tail`) | дефект воспроизведён: `staged-old` → «данных нет»/`serial-fallback`; `staged-refused` → `lanes` (свежий отказ проигнорирован) |
+| новые фикстуры после фикса | `staged-old` → `lanes: fn-lanes staged: …` / bench `lanes`; `staged-refused` → warn «vmm lanes ОТКАЗАНЫ …» (тексты прежние) / bench `serial-fallback`; `refused-staged` → `lanes` / `lanes` |
+| прежние 6 фикстур этапа 8 (`staged/refused/both/none/spec-dflash/spec-none` × 3 профиля × check/bench) | `cmp` HEAD-vs-fix: **6/6 байт-в-байт идентично** (в т.ч. `both.log`: refused выше staged → остаётся lanes) |
+| `bash -n` (health.sh, bench.sh) | OK |
+| shellcheck-мультимножество vs базлайн этапа 9 (`sc_multiset.sh final/sc_after_final.txt`) | **идентично** (health.sh — 0 находок; дельты по файлам нет) |
+| `cli_parity.sh` | PASS (usage == golden, статус/доктор/модели/bench-help без дрейфа) |
+| golden-матрица `golden_stack.sh post` | дельта post-vs-pre == зафиксированная дельта этапа 9 (`final/golden_diff.txt`, 12 файлов = `.env`×4 + юниты×8, дрейфа нет); compose/фикстуры байт-в-байт |
+| `pure_funcs.sh` | PASS (в т.ч. md5 фикстуры `253c7ac5…`) |
+| `bench_py_parity.sh` | PASS (artifact/report побайтово, `--compare` без изменений — enum роута не тронут) |
+| `ttft_test.sh` | PASS |
+| `install_sandbox.sh` | PASS |
+| п.3 (singleton-ветка на flash-multi spec-строке) | микропрогон на логе с `spec: qwen4 native mtp`: `ROUTE_SPEC="spec: qwen4 native mtp"` → default-ветка даёт `singleton-serial` (`case "spec: dflash"*` НЕ матчит мtp-строку → dflash не заявляет), flash-multi-ветка — `lanes`; на 27b-single-логе (`spec: dflash (draft …)`) фикстура `spec-dflash` — `singleton-dflash` байт-в-байт. Логика корректна, кода не менял |
+
+### Not checked internally
+
+- Повторная внешняя приёмка EXP-005 на второй машине (полный стрим живого
+  лога 834 KB → `lanes`, bench-артефакт `"route": "lanes"`) — перезапускает
+  оркестратор; на машины не заходил.
+- Косметика вне раунда (неправка, фиксация): при НЕ-каноническом профиле
+  (ручной прогон default-ветки на flash-multi-контейнере) default-ветка
+  `check_route` печатает метку «singleton+DFlash» с фактической spec-строкой
+  в скобках — pre-existing поведение, канон `HFCTL_PROFILE` туда не приводит.
+
+### Known limitations / Out-of-scope proposals
+
+- `shortcut:` в `route_snapshot`: цена — три полных прохода лога на снимок;
+  при росте логов долгоживущего контейнера — апгрейд по комментарию
+  (`--since` от старта / поле движка). Делать окна сейчас = вернуть дефект.
+- Иное не трогал: `wait_health` (`--tail 25/30`, `--since 10m`) — другой
+  контракт (хвост при отказе), `env_val` — не тронут.
+
 ## Test report (tester)
 
 Verdict: **BLOCKED-EXTERNAL** — все внутренние проверки зелёные; внешние

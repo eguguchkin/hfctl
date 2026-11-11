@@ -77,33 +77,45 @@ smoke() {
 }
 
 # Назначение: единый снимок фактического роута («фактический роут» модуля):
-#   один раз тянет хвост логов контейнера и извлекает движковые предикаты
+#   читает лог контейнера целиком потоково и извлекает движковые предикаты
 #   (lanes staged / lanes refused / spec) + health-режим слотов — из него
 #   питаются и check_route, и bench_route (критерии больше не расходятся:
 #   кто последний сказал в логах, тот и роут).
 #
-# Побочные эффекты: подпроцессы podman logs (--tail 400, stderr слит в
-#   stdout), curl GET /health (5 с) + python3 health_mode.py; ПИШЕТ глобалы
-#   ROUTE_LOG/ROUTE_STAGED/ROUTE_REFUSED/ROUTE_SPEC/ROUTE_HEALTH; в stdout не
-#   печатает.
+# Побочные эффекты: подпроцессы podman logs (ЛОГ ПОЛНОСТЬЮ, stderr слит в
+#   stdout; три потоковых прохода — staged/refused/spec), curl GET /health
+#   (5 с) + python3 health_mode.py; ПИШЕТ глобалы
+#   ROUTE_STAGED/ROUTE_REFUSED/ROUTE_SPEC/ROUTE_HEALTH; в stdout не печатает.
 #
 # Ограничения/допущения: требует глобалы CONTAINER, PORT, TPL_DIR
 #   (диспетчер). Глобалы (строки; '' = совпадения нет; ROUTE_HEALTH при
-#   недоступном/нераспознанном /health = '?'): ROUTE_LOG — хвост логов,
-#   ROUTE_STAGED/ROUTE_REFUSED/ROUTE_SPEC — последнее совпадение шаблона
-#   (tail -1). Шаблоны grep — шесть принятых движковых швов (переехали
-#   дословно из check_route/bench_route), тексты движка правятся здесь, а не
-#   «чинятся». «|| true» при grep обязателен под set -e+pipefail: отсутствие
-#   совпадения — норма (lanes приняты → refused нет; serial → staged нет).
+#   недоступном/нераспознанном /health = '?'): ROUTE_STAGED — последнее
+#   совпадение staged, ОБНУЛЁННОЕ, если refused стоит строкой ниже (свежий
+#   отказ на перезапущенном контейнере перекрывает принятый staged — роут =
+#   отказ); ROUTE_REFUSED/ROUTE_SPEC — последнее совпадение шаблона
+#   (tail -1). Позиции сравниваются по номерам строк grep -n (префикс
+#   «NN:», отделяется «${s#*:}»/«${s%%:*}»). Шаблоны grep — шесть принятых
+#   движковых швов (переехали дословно из check_route/bench_route), тексты
+#   движка правятся здесь, а не «чинятся». «|| true» при grep обязателен
+#   под set -e+pipefail: отсутствие совпадения — норма (lanes приняты →
+#   refused нет; serial → staged нет).
 #
 # @returns integer # всегда 0 — отказы заглушены; пустые поля снимка — норма
 route_snapshot() {
-  ROUTE_LOG=$(podman logs --tail 400 "$CONTAINER" 2>&1 || true)
-  ROUTE_STAGED=$(printf '%s' "$ROUTE_LOG" \
-    | grep -oE "fn-lanes staged: topology=[a-z]+ lanes=[0-9]+[^\"]*spec=[a-z0-9]+" | tail -1) || true
-  ROUTE_REFUSED=$(printf '%s' "$ROUTE_LOG" \
-    | grep -oE "qwen4 lanes refused:[^-—]*" | tail -1) || true
-  ROUTE_SPEC=$(printf '%s' "$ROUTE_LOG" \
+  # shortcut: полный стрим-проход лога на каждый предикат (~0.4 с на 7k строк
+  # живой машины), граница — очень долгоживущий контейнер с большим логом;
+  # апгрейд при боли: окно --since от старта контейнера или поле роута в /health.
+  local staged refused
+  staged=$(podman logs "$CONTAINER" 2>&1 \
+    | grep -noE "fn-lanes staged: topology=[a-z]+ lanes=[0-9]+[^\"]*spec=[a-z0-9]+" | tail -1) || true
+  refused=$(podman logs "$CONTAINER" 2>&1 \
+    | grep -noE "qwen4 lanes refused:[^-—]*" | tail -1) || true
+  ROUTE_STAGED=${staged#*:}
+  ROUTE_REFUSED=${refused#*:}
+  # «кто последний сказал»: свежий отказ строкой ниже принятого staged снимает lanes
+  if [ -n "$ROUTE_STAGED" ] && [ -n "$ROUTE_REFUSED" ] && \
+     [ "${staged%%:*}" -lt "${refused%%:*}" ]; then ROUTE_STAGED=; fi
+  ROUTE_SPEC=$(podman logs "$CONTAINER" 2>&1 \
     | grep -oE "spec: [a-z0-9 ]+" | tail -1 | head -c 60) || true
   ROUTE_HEALTH=$(curl -fsS -m 5 "http://127.0.0.1:$PORT/health" 2>/dev/null \
     | python3 "$TPL_DIR/python/health_mode.py" 2>/dev/null || echo '?')
@@ -121,7 +133,8 @@ route_snapshot() {
 #   отказе lanes. Ничего не меняет.
 #
 # Ограничения/допущения: требует warn (диспетчер) и route_snapshot этого
-#   файла. Приоритет расхождений как на этапе 8: staged → refused → «данных
+#   файла. Приоритет расхождений решает снимок: ROUTE_STAGED в нём уже снят
+#   свежим отказом (refused строкой ниже), далее staged → refused → «данных
 #   нет». Best-effort по дизайну: пустые поля снимка — штатные ветки («данных
 #   нет», «?»); неизвестный prof попадает в default-ветку case
 #   (singleton+DFlash). Тексты вывода — контракт (spec §7), не менять.
