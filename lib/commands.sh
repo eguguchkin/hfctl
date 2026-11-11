@@ -64,7 +64,7 @@ cmd_install() {
   podman image exists "$IMAGE" || podman pull "$IMAGE"
   pull_profile_models "$prof"
   compose up -d 2>&1 | tail -3
-  apply_profile "$prof"
+  apply_profile "$prof" || true    # отказ ключей — warn внутри (rc 1), не смерть: продолжаем с recreate
   compose up -d --force-recreate 2>&1 | tail -3
   wait_health 900
   smoke
@@ -155,7 +155,7 @@ cmd_use() {
   local model; model="${HFCTL_MODEL:-$(profile_field "$p" 1)}"
   write_env "$p" "$model"
   compose up -d 2>&1 | tail -2      # контейнеры могут быть остановлены (off)
-  apply_profile "$p"
+  apply_profile "$p" || true        # отказ ключей — warn внутри (rc 1), не смерть
   compose up -d --force-recreate 2>&1 | tail -2
   if ! wait_health 600; then
     # движок отказал в загрузке (admission/refusal): откатываем канон на прежний
@@ -562,8 +562,8 @@ cmd_pull() {
 # Ограничения/допущения: по умолчанию STATE_BASE/MODELS_BASE лежат внутри
 #   $STACK_DIR и удаляются вместе с ним; кастомные пути вне стека rm -rf
 #   стека не достанет (вывоз базы при сохранении делает это явно). Локалы
-#   purge_models/purge_image — '0' | '1'; keep — ГЛОБАЛ (local объявить
-#   забыто): путь-временя вывезенной базы либо ''. Сбои остановки/снятия
+#   purge_models/purge_image/keep — keep: путь-временя вывезенной базы либо
+#   ''. Сбои остановки/снятия
 #   вешает на `|| true` (uninstall доходит до конца); незащищённые sudo rm
 #   и mv завершают процесс по set -e. Неинтерактив без --yes — штатный
 #   отказ (ask авто-нет).
@@ -571,7 +571,7 @@ cmd_pull() {
 # @param 1..N: string[] # флаги (все опциональны): --purge-models | --purge-image | --yes
 # @returns integer      # всегда 0 при возврате («uninstall DONE»); отказ по вопросу — exit 0
 cmd_uninstall() {
-  local purge_models=0 purge_image=0
+  local purge_models=0 purge_image=0 keep=""
   while [ $# -gt 0 ]; do
     case "$1" in
       --purge-models) purge_models=1; shift ;;
@@ -591,7 +591,6 @@ cmd_uninstall() {
   ( cd "$STACK_DIR" 2>/dev/null && compose down 2>&1 | tail -2 ) || true
   # модели живут в базе (models/<сет>/ на ВСЕ сеты!) — при сохранении
   # переезжает БАЗА целиком: иначе rm -rf $STACK_DIR сносит чужие сеты
-  keep=""
   if [ "$purge_models" != 1 ] && [ -d "$MODELS_BASE" ]; then
     keep="$STACK_DIR.hfctl-models-$$"
     mkdir -p "$(dirname "$keep")"

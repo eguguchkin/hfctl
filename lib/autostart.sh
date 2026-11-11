@@ -223,7 +223,9 @@ hf_up_locked() {
 #   номер попытки из seq 1 24, целое 1..24) ≈ 4 мин; юнит со
 #   TimeoutStartSec=900 и Restart=on-failure добирает остальное. Гейт нод —
 #   renderD* + /dev/kfd (у Halo card0 может не быть вовсе — нумерация с 1,
-#   AGENTS-грабля 5). rc=1 для юнита — штатный сигнал неудачи
+#   AGENTS-грабля 5). Периодический force-recreate выполняется ВНУТРИ
+#   удерживаемого flock: при занятом lock'е пропуск (не ошибка, следующий
+#   цикл догонит). rc=1 для юнита — штатный сигнал неудачи
 #   (Restart=on-failure).
 #   Требует глобалы CONTAINER, STACK_DIR (диспетчер), CF и compose
 #   (stack.sh), hf_up_locked этого файла.
@@ -240,8 +242,11 @@ cmd_boot() {
       return 0
     fi
     # не поднялся: возможно,devices востребовались иначе (перенумерация
-    # /dev/dri между загрузками) — пересоздаём контейнер раз в 3 попытки
-    [ $((i % 3)) -eq 0 ] && ( flock -n 9 || true; compose up -d --force-recreate 2>&1 | tail -1 ) 9>"$STACK_DIR/.hfctl.lock" || true
+    # /dev/dri между загрузками) — пересоздаём контейнер раз в 3 попытки,
+    # ВНУТРИ удерживаемого lock'а (flock -n 9 && … — при занятом lock'е
+    # recreate НЕ выполняется: конкурент (watchdog/up) уже что-то делает,
+    # следующий цикл догонит; гонка правки 336cd1f снята)
+    [ $((i % 3)) -eq 0 ] && ( flock -n 9 && compose up -d --force-recreate 2>&1 | tail -1 || true ) 9>"$STACK_DIR/.hfctl.lock" || true
     sleep 10
   done
   echo "boot: контейнер так и не запущен за 4 мин" >&2

@@ -77,18 +77,16 @@ cur_profile() { local p; p=$(env_val HFCTL_PROFILE); echo "${p:-$PROFILE_DEFAULT
 # Побочные эффекты: только печать в stdout; читает .env через env_val;
 #   глобалы не меняет.
 #
-# Ограничения/допущения: ветка отказа `|| echo "$(profile_field
-#   "$(cur_profile)" 1)"` НЕдостижима: env_val всегда возвращает 0
-#   (`|| true` внутри), поэтому при отсутствии ключа HIPFIRE_MODEL в .env
-#   stdout пустой — модель профиля по умолчанию НЕ подставляется. Отсутствие
-#   .env даёт тот же пустой stdout; живые вызывающие (health.sh smoke,
-#   commands.sh status/use, bench.sh) die-ят на отсутствующий .env заранее.
+# Ограничения/допущения: '' при отсутствии ключа HIPFIRE_MODEL в .env —
+#   env_val всегда возвращает 0 (`|| true` внутри), поэтому дефолт профиля
+#   НЕ подставляется; прежний fallback `|| echo "$(profile_field …)"` был
+#   недостижим и удалён (поведение не меняется). Отсутствие .env даёт тот
+#   же пустой stdout; живые вызывающие (health.sh smoke, commands.sh
+#   status/use, bench.sh) die-ят на отсутствующий .env заранее.
 #
-# @stdout /^[\w.-]+:[\w.-]+$/ | '' # HIPFIRE_MODEL verbatim из .env; '' —
-#   ключа нет (fallback недостижим, см. Ограничения)
-# @returns integer                 # всегда 0 — rc env_val (всегда 0),
-#   fallback-ветка не выполняется
-cur_model()   { env_val HIPFIRE_MODEL || echo "$(profile_field "$(cur_profile)" 1)"; }
+# @stdout /^[\w.-]+:[\w.-]+$/ | '' # HIPFIRE_MODEL verbatim из .env; '' — ключа нет
+# @returns integer                 # всегда 0 — rc env_val (всегда 0)
+cur_model()   { env_val HIPFIRE_MODEL; }
 
 # ── префлайт и хост-подготовка ──────────────────────────────────────────────
 # Назначение: проверка окружения и разовая подготовка хоста перед

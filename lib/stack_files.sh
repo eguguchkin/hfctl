@@ -184,7 +184,7 @@ write_stack_files() {
 #   откат в cmd_use при неподошедшем профиле — ЕДИНСТВЕННЫЙ вызов после
 #   compose, без recreate. Откат передаёт prev_prof=cur_profile и
 #   prev_model=cur_model как есть: пустой prev_model возможен на
-#   вырожденном .env без HIPFIRE_MODEL (fallback cur_model недостижим).
+#   вырожденном .env без HIPFIRE_MODEL (cur_model не подставляет дефолт).
 #
 # @param 1: '27b-single' | '27b-slots' | 'flash-multi' # канонический id
 #   профиля (вызывающие идут после resolve_profile; откат — verbatim
