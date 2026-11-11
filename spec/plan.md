@@ -298,12 +298,12 @@ python-помощники, bench-фикстура). Дистрибуция — �
 машинах**, затем удалить из кода всё переходное.
 
 ### Порядок (предпосылка до кодовых коммитов)
-- [ ] 0а. Read-only аудит миграций на обеих машинах: per-профильные каталоги
+- [x] 0а. Read-only аудит миграций на обеих машинах: per-профильные каталоги
       vs содержимое legacy-вольюмов (FAEX1: hipfire_hipfire-config/kernels ещё
       существуют), сетовая раскладка моделей, HFCTL_PROFILE в .env.
-- [ ] 0б. ГО пользователя (деструктив): tar-бэкап (config БЕЗ session-cache —
-      он ротируется; kernels целиком) в ~/hipfire/ → `podman volume rm`
-      legacy-вольюмов на FAEX1. На evo legacy нет (чужой hfbox-hipfire-config
+- [x] 0б. ГО пользователя (деструктив): `podman volume rm` legacy-вольюмов на
+      второй машине — выполнено 2026-11-11 (бэкап пользователь явно отменил;
+      ни один контейнер вольюмы не использовал, сервер остался healthy). На evo legacy нет (чужой hfbox-hipfire-config
       не трогать).
 
 ### DoD (код, внутренние; поведение CLI сохраняется, кроме явно перечисленного)
@@ -339,11 +339,35 @@ python-помощники, bench-фикстура). Дистрибуция — �
       COMPOSE_FILE, форс-канал); README: --force + env-синоним.
 
 ### DoD (внешние, машины — только с GO пользователя)
-- [ ] 10. прод-машина (60 GiB): update деревом → use↔use → off/on → doctor (warn про
+- [x] 10. прод-машина (60 GiB): update деревом → use↔use → off/on → doctor (warn про
       вольюмы отсутствует) → smoke → **ребут → сам-подъём** (cmd_boot менялся —
       boot-приёмка обязательна) → healthy+smoke, итог 27b-single.
-- [ ] 11. вторая машина (128 GB): update деревом без остановки → doctor → smoke →
+- [x] 11. вторая машина (128 GB): update деревом без остановки → doctor → smoke →
       flash-multi healthy + `fn-lanes staged`; legacy-вольюмов в
       `podman volume ls` нет (после 0б).
-- [ ] 12. hflab: AGENTS.md hfctl-секция (переходного нет; env без COMPOSE_FILE;
+- [x] 12. hflab: AGENTS.md hfctl-секция (переходного нет; env без COMPOSE_FILE;
       форс-канал) + STATE.md; hfctl spec/state.md — «этап 9 принят».
+
+### Итог приёмки (2026-11-12) — этап ПРИНЯТ
+
+Код: C1–C8 + три фикс-раунда, найденные внешней приёмкой: `0caf290` (предикат
+роута читает лог контейнера целиком, а не `--tail 400`: на долгоживущем
+контейнере строка загрузки выпадала из окна → `bench`/`doctor` врали
+«serial-fallback» при принятых lanes), `253e7fb` (`smoke` — один ретрай через
+15 с на окне холодного прогрева ядер движка), `4be1818` (`_boot`: recreate под
+блокирующим `flock -w`, начиная со 2-й попытки, дедлайн 420 с — правка DoD 7б
+лишила boot самовосстановления при занятом вотчдогом локе).
+
+Внешнее: вторая машина (128 GB) — EXP-005 PASS (update без остановки, doctor
+чист, `fn-lanes staged … lanes=4 spec=mtp`, bench quick `route=lanes`,
+solo-code 75.22 tok/s τ=5.00, legacy-вольюмов нет). Прод-машина (60 GiB) —
+EXP-004 прогон 2 (update → use↔use → doctor → off/on → watch-тик, P1–P7) +
+EXP-006 (ребут → сам-подъём boot-юнитом, healthy через 15 с, `spec: dflash`).
+Оговорки честно: P6 EXP-006 (smoke) упал на баге экранирования самого харнеса —
+ответ модели в том же окне подтверждён ручной пробой, автоматический `SMOKE: OK`
+на тех же промптах есть в EXP-004; живой positive-кейс перенумерации `/dev/dri`
+на финальном коде не выпадал (покрыто negative-кейсом прогона 2 EXP-004 и
+харнесом `boot_recreate.sh`).
+
+Роль-артефакты: `spec/task-9.md` (Brief/Design/Test strategy/Dev report
+Round 1–3/Test report Round 2), `spec/review.md` (APPROVED round 2).

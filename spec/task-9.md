@@ -985,9 +985,8 @@ Verdict: **BLOCKED-EXTERNAL** — все внутренние проверки �
 | `EXP-004-evo-full.sh` (прод-машина (60 GiB): read-only before → update деревом из клона → use 27b-slots↔27b-single → `.env` без COMPOSE_FILE → doctor без legacy-WARN → off/on (маркер+вотчдог-молчание 90 с) → watch-тик без «ретраи» → **reboot → сам-подъём** (`_boot`;Created контейнера ≥ boot как доказательство recreate под flock) → smoke; финал 27b-single healthy) | 10 | **created** (не запускался; `bash -n` OK; все удалённые payload-скрипты проверены токенизатором на синтаксис; диагностика при FAIL — podman logs -t + systemctl --user status, продукт не чинит) |
 | `EXP-005-faex-lanes.sh` (вторая машина (128 GB): before healthy + `podman volume ls | grep -i hipfire` пусто → update деревом **без остановки** (healthy всё время) → doctor чист → smoke → `fn-lanes staged` в `podman logs -t … 2>&1` → `hfctl bench` quick: артефакт `"route": "lanes"`, md5-warn нет → финал flash-multi healthy) | 11 | **created** (то же; грабля stderr-логов учтена — `2>&1` везде) |
 
-Оба: ssh-паттерн hflab/AGENTS.md (`ssh -i ~/.ssh/strix_halo_key -o
-BatchMode=yes hipfire@<IP> 'bash -s'`), IP взяты из hflab-AGENTS, в hfctl-репо
-не попали; каждый удалённый шаг под `timeout` (900 с; bench 1200 с; возврат
+Оба: ssh-паттерн и адрес/ключ — только в лаборатории (hflab/AGENTS.md),
+в hfctl-репо ничего из них не появляется; каждый удалённый шаг под `timeout` (900 с; bench 1200 с; возврат
 после ребута ≤10 мин, healthy ≤15 мин); мусор — только собственный клон
 (/tmp/hfctl-exp00{4,5}-clone, удаляется trap'ом) + штатный bench-артефакт на
 FAEX1. Носители: `hflab/.local-analysis/task9-exp/EXP-00{4,5}-*.sh`, вывод —
@@ -1020,3 +1019,96 @@ stop/cfgset/watch/force-матрицы — **все зелёные**. Shellcheck
    внешних 10–12 возможно только после EXP.
 
 **BLOCKED-EXTERNAL: ожидает GO на EXP-004 (прод-машина (60 GiB)) и EXP-005 (вторая машина (128 GB)).**
+
+### Round 2 (2026-11-12): фикс-раунды 1–3 и ответы EXP-004/005/006
+
+Verdict: **PASS** — все внутренние проверки зелёные на HEAD `4be1818`; внешние
+DoD 10–11 закрыты ответами EXP-004/005/006 (артефакты сверены мной
+независимо, не пересказом анализа).
+
+- Date / round: 2026-11-12, tester round 2 (независимая перепроверка
+  фикс-раундов 1–3 + закрытие внешних ответов). Носитель:
+  `hflab/.local-analysis/task9-exp/`. Песочница своя:
+  `/tmp/hfctl-stage9-tester-r2` (чужие `$S9`/stage8 не тронуты; только
+  read-only копии stub'ов и `old-hfctl`/`old-funcs.sh` из stage8-песочницы —
+  те же артефакты, что использовал `setup_s9.sh`). `tree` = `git archive
+  4be1818`, `pre` = `336cd1f` (этап 8), `pre-r2` = `0caf290` (негативный
+  контроль smoke). На машины не заходил.
+
+#### Internal checks
+
+| # | Проверка (команда) | Результат |
+|---|---|---|
+| 8 | `bash -n hfctl install.sh lib/*.sh` | **12/12 OK** |
+| 8 | shellcheck-мультимножество HEAD vs базлайн этапа 9 (`final/sc_after_final.txt`, `sc_multiset.sh`) | **идентично** (37 находок, rc=0) |
+| 8 | shellcheck HEAD vs этап 8 (`pre`=336cd1f, относительный контекст) | дельта ровно зафиксированная: −SC2034 `bench.sh BIND`, −SC2034 `commands.sh retries`, −SC2005 `stack.sh echo $(…)`, +SC2034 `HFCTL_FORCE` (кросс-файльный global, код уже в базлайне); **новых кодов нет** |
+| 1 | grep-гейты `migrate_state/migrate_models/state_dir/MODEL_DEFAULT/FORCE_GATE/hipfire_hipfire-config/volume rm` по hfctl/install.sh/lib/tpl | **каждый = 0**; `COMPOSE_FILE` — только комментарий-обоснование `lib/stack.sh:13` (по Design §3) |
+| 6а | `route_matrix.sh pre|post` — **9 фикстур** × 3 профиля × check/bench | прежние 6 (`staged/refused/both/none/spec-dflash/spec-none`) — `cmp` post-vs-pre **6/6 байт-в-байт** (тексты `check_route` = этап 8); мои post **9/9 == Round-1 снапшот** (`final/round1-post/`) — смоук/boot-правки на роут не повлияли; новые 3: `staged-old` (staged за хвостом) → `lanes`, `staged-refused` (свежий отказ) → warn+`serial-fallback`, `refused-staged` → `lanes` — «кто последний сказал»; enum `bench_route` даёт **все 5 значений** |
+| R2 | `smoke_retry.sh` (4 сценария) на HEAD | **PASS**: пустой→ок и curl22→ок — `SMOKE: OK`, ровно 1 warn+1 `sleep 15`; оба-пустые и оба-curl-fail — `FATAL`, warn ×2, curl ×4 |
+| R2 | негативный контроль: тот же «пустой→ок» на OLD (`0caf290`, без ретрая) | **FATAL** rc=1, 2 curl, 0 sleep — харнес реально бьёт по дефекту |
+| R3 | `boot_recreate.sh` (4 сценария) на HEAD под `unshare -rm` | **PASS**: (а) занятый лок 100 в.с → rc=0, recreate **ровно в момент освобождения** (`compose.log` ts == busy_until, не пропуск); (б) compose-событий внутри чужого удержания — 0, `flock-w wait` зафиксирован (параллельного recreate нет); (в) running на 1-й попытке → 1 `up -d`, recreate 0, sleep 0; (г) не поднимаемый → rc=1 + «так и не запущен за ~7 мин», вирт. длительность **ровно 420 с**, recreate 41 / sleep 42 (дедлайн раньше потолка 48) |
+| R3 | исходник `cmd_boot` (чтение): нет формы `flock -n 9 &&` в recreate (=0), есть блокирующий `flock -w 120 9 && compose up -d --force-recreate` (:272), триггер `[ "$i" -ge 2 ]`, дедлайн `$((date+%s+420))` и проверка **первой строкой тела цикла**, `seq 1 48` — потолок-страховка | **PASS**; бюджет: 420 с цикла + хвост ≤120 (flock -w) + 2 compose + sleep 10 ≈ 10 мин < `TimeoutStartSec=900` (`tpl/systemd/hipfire-compose.service.tpl:12`, рендер подтверждён в golden-матрице); `hf_up_locked` (`-n`, пропуск штатного `up`) не тронут |
+| 7д,2,5 | `cli_parity.sh` (usage vs `usage_new_golden.txt` cmp с обеих сторон, unknown/status/`status --json`/doctor/models/bench --help) | **PASS** |
+| 3,8 | `golden_stack.sh pre|post` + мой diff 40 файлов | различия = `.env`×4 (+штампы путей песочницы) — единственный контентный дельта **−`COMPOSE_FILE=…`**; юниты после нормализации штампов идентичны; compose/фикстуры байт-в-байт; placeholder-residue 0 |
+| 8 | `pure_funcs.sh` (md5 `253c7ac5…` tpl/bench + old-встроенная идентична) / `bench_py_parity.sh` / `ttft_test.sh` / `install_sandbox.sh` | **PASS / PASS / PASS / PASS** (old-пара = pre-stage-8 копия из stage8-песочницы, как в `setup_s9.sh`) |
+| 6б,7а,5,2 | `stop_matrix.sh` / `cfgset_fail.sh` (rc=1, warn с перечнем, 11 вызовов) / `force_gate.sh` (plain rc=1; env==flag) / `watch_retries.sh` | **PASS ×4** |
+| 6а | предикат единый, полный стрим: в `route_snapshot` — `podman logs` без `--tail`, `grep -noE` + приоритет последней реплики, `shortcut:` на месте | PASS |
+| R2/R3 | scope-контроль: `git diff --stat 253e7fb..4be1818` — из кода тронут **только** `lib/autostart.sh` (+specs); раунды не протекли в чужие модули | PASS |
+| house-style | python-проверка 12 файлов (unicode-колонки): `#@` слитно = 0; `bool/int/never` как типы = 0 (упоминание «never» в прозе `hfctl:106` — описание, почему тип не используется, пре-existing); три секции у **всех 67 функций**; хвостовые `#` выровнены по **символам**: **84/84** групп | PASS; единственная лакуна — `install.sh ok()` без «Ограничения» (файл побайтово = этап 8, пре-existing backlog, не регресс этапа 9) |
+
+#### Failures (FAIL)
+
+Нет.
+
+#### External experiments — статус «ответ получен и сверен»
+
+| EXP-id | DoD | Ответ → моя сверка артефакта |
+|---|---|---|
+| `EXP-004-evo-full` (прогон 2, код `253e7fb`) | 10 | `result.txt`: P1–P7 **[ШАГ] OK** (update без остановки md5 `3198d8e7`→тот же; use 27b-slots↔27b-single со `SMOKE: OK`; `.env` без `COMPOSE_FILE`; doctor без legacy-WARN; off/on + вотчдог-молчание; watch без «ретраи»), **P8 FAIL** (ребут → не healthy 15 мин; диагностика: юнит `Result: timeout`, контейнер Exited) — воспроизвела дефект `-n`-пропуска → фикс-раунд 3. Совпадает с анализом оркестратора. |
+| `EXP-005-faex-lanes` (прогон 2, код `253e7fb`) | 11 | `RESULT: PASS`: `fn-lanes staged: topology=single lanes=4 … spec=mtp` в `podman logs -t`, артефакт **`route в артефакте: lanes`**, bench quick без md5-warn, `volume ls` без hipfire, сервер не останавливался. Round 3 (`4be1818`) меняет только `lib/autostart.sh` (вне пути EXP-005) → ответ переносим на финальный код без перезапуска. |
+| `EXP-006-evo-boot-recreate` (прогон 2, код `4be1818`) | 10 (ребут) | **HEALTHY через 15 с** после возврата ssh; живое дерево содержит `flock -w 120 9 && … --force-recreate` (**строка 272 побайтово = HEAD `lib/autostart.sh:272`**, моя сверка), `[ "$i" -ge 2 ]`, deadline 420; `device_errors=0` (перенумерации в этом boot не было → recreate не требовался, сам-подъём обычный); P6 FAIL по харнесу (вложенные кавычки → curl 400), ручная проба в том же окне: content «ок», finish=stop. |
+
+**Оценка оговорки P6 (формулировка анализа) — согласна закрыть DoD 10 без
+пятого ребута.** Аргументы: (1) содержательная часть DoD 10 («ребут →
+сам-подъём → healthy + смоук») доказана в одном boot-окне: P4 healthy на
+финальном коде (побайтовая идентичность живой строки 272 с HEAD — код
+фикс-раунда 3 реально исполнялся) + ответ модели в том же окне; (2) код
+`smoke` с `253e7fb` не менялся, а автоматический `SMOKE: OK` на этих же
+промптах уже получен в P3/P4 прогона 2 EXP-004 — автоматический PASS P6
+повторял бы тот же серверный путь; (3) отказ P6 — дефект экранирования в
+самом EXP-скрипте (исправлен в носителе, `bash -n` зелёный), продукта не
+касается; (4) цена пятого ребута — простой прод-машины нулевой
+информативной ценности. Условие перенумерации при этом покрыто не «на
+машине на финальном коде», но исчерпывающе: живой negative-кейс (прогон 2
+EXP-004: перенумерация была → `-n`-пропуск → 15 мин простоя) + харнес
+`boot_recreate` (занятый лок → recreate исполнен, без пересечений; дедлайн
+420 с). **Замечание честности (не блокер):** в прогоне 2 EXP-006 шаг P2
+фактически не обновлял дерево (`/tmp/hfctl-src.git` отсутствовал — tmpfs
+между прогонами); доставка финального кода доказана grep'ом живого дерева +
+побайтовой сверкой строки 272 + md5, а сам механизм «update деревом» покрыт
+P2 прогона 2 EXP-004 — покрытие корректно разнесено по двум прогонам.
+
+#### Regression (итог)
+
+Полный регресс закрытых этапов перепроган заново на HEAD `4be1818` в своей
+песочнице: golden-матрица (40 файлов), CLI-parity + usage-golden,
+route-матрица 9 фикстур (vs этап 8 и vs Round-1), stop/cfgset/force/watch,
+pure_funcs, bench_py_parity, ttft_test, install_sandbox, smoke_retry
+(+негативный контроль), boot_recreate (4 сценария), shellcheck
+(== базлайн этапа 9; дельта к этапу 8 объяснена), house-style — **все
+зелёные**.
+
+#### Что НЕ проверялось (границы среды)
+
+- Реальный ребут/реальный блокирующий flock под конкуренцией вотчдога
+  (в среде разработки busybox-flock без `-w`; проверено stub-моделью
+  util-linux-семантики; целевые машины — util-linux).
+- Живые задержки `sleep 15`/cold-warmup окна и wall-clock бюджет `_boot`
+  (виртуальные часы харнеса; внешняя крышка `TimeoutStartSec=900` — systemd).
+- Повторный запуск EXP на машинах (доступа из среды нет) — только сверка
+  артефактов-ответов; состояние реальных `podman volume ls`, реальная
+  MemAvailable в doctor, реальная перенумерация `/dev/dri`.
+- `hfctl _watchdog`/`hf_up_locked` поведением не гонялись (не менялись;
+  проверено чтением + diff-scope).
+- DoD 12 (hflab AGENTS/STATE + статус «этап 9 принят» в `spec/state.md`) —
+  предмет оркестратора, не моя проверка.
