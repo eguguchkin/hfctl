@@ -25,7 +25,8 @@
 # Ограничения/допущения: порядок фаз фиксирован (RAM-гейт ДО любого
 #   скачивания — spec §6). Неизвестный флаг или профиль → die (exit 1).
 #   Env-входы: HFCTL_MODEL — модель по умолчанию поверх профиля;
-#   HFCTL_FORCE=1 или --force — FORCE_GATE=1 (обход RAM-гейта с warn);
+#   HFCTL_FORCE=1 или --force — обход RAM-гейта с warn (флаг внутри
+#   install выставляет HFCTL_FORCE=1 — единственный env-канал);
 #   HFCTL_YES=1 или --yes — неинтерактив. Локалы одной строкой:
 #   prof — алиас профиля из --profile ('' → PROFILE_DEFAULT);
 #   no_autostart/force — '0' | '1'.
@@ -47,11 +48,11 @@ cmd_install() {
       --no-autostart) no_autostart=1; shift ;;
       --force)       force=1; shift ;;
       --yes)         ASSUME_YES=1; shift ;;
-      *) die "неизвестный флаг install: $1 (доступны: --profile ${PROFILE_LIST// /|} --port --bind --models-dir --no-autostart --yes)" ;;
+      *) die "неизвестный флаг install: $1 (доступны: --profile ${PROFILE_LIST// /|} --port --bind --models-dir --no-autostart --force --yes)" ;;
     esac
   done
   prof=$(resolve_profile "${prof:-$PROFILE_DEFAULT}") || die "неизвестный профиль '$prof' (доступны: $PROFILE_LIST)"
-  FORCE_GATE="${FORCE_GATE:-}"; [ "${force:-0}" = 1 ] && FORCE_GATE=1
+  [ "${force:-0}" = 1 ] && HFCTL_FORCE=1
   profile_gate "$prof"          # RAM-гейт: отказ ДО любого скачивания (spec §6)
   set_models_dir "$prof"
   preflight
@@ -132,7 +133,7 @@ cmd_use() {
   p=$(resolve_profile "$p") || die "неизвестный профиль '$p' (доступны: $PROFILE_LIST)"
   local prev_prof prev_model
   prev_prof=$(cur_profile); prev_model=$(cur_model)
-  [ "${force:-0}" = 1 ] && FORCE_GATE=1
+  [ "${force:-0}" = 1 ] && HFCTL_FORCE=1
   profile_gate "$p"             # RAM-гейт: отказ ДО любого скачивания (spec §6)
   set_models_dir "$p"
   # порт/bind — из текущего .env (use не трогает параметры, только профиль);
