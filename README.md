@@ -86,10 +86,13 @@ hfctl bench --json > b.json # машиночитаемый артефакт
 ## Как это устроено
 
 - Всё в одном каталоге `~/hipfire/`: `hfctl` (диспетчер), `lib/` (модули),
-  `tpl/` (шаблоны: compose/.env/юниты/python/bench-фикстура), `models/<сет>/`
+  `tpl/` (шаблоны: compose/.env/юниты/python/bench-фикстура
+  `tpl/bench/merge_sort_thinking_off.txt`), `models/<сет>/`
   (модели, per-сет), `profiles/<профиль>/{config,kernel}` (состояние движка
   per-профиль: конфиг, disk-тир контекст-кэша в `config/session-cache/`,
   кэш прекомпилированных ядер; бэкап = `tar` каталога), compose-файлы, `.env`.
+  В `.env` нет строки `COMPOSE_FILE`: podman-compose её не читает, hfctl сам
+  передаёт каноническую `-f`-тройку при каждом вызове.
   Вне каталога: systemd user юниты, контейнеры podman,
   `/etc/security/limits.d/99-hipfire-memlock.conf`, группа `render`, linger.
 - Дистрибуция: `git clone` + `./install.sh` (копирует `hfctl`, `lib/`,

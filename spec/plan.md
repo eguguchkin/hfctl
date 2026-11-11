@@ -307,35 +307,35 @@ python-помощники, bench-фикстура). Дистрибуция — �
       не трогать).
 
 ### DoD (код, внутренние; поведение CLI сохраняется, кроме явно перечисленного)
-- [ ] 1. Удалено переходное: migrate_state, migrate_models, state_dir
+- [x] 1. Удалено переходное: migrate_state, migrate_models, state_dir
       (последние потребители — log-строки миграций), v1-.env ветка
       cmd_install/use (+ implicit-глобал MODEL_DEFAULT), doctor-warn про
       legacy-вольюмы, `podman volume rm` из uninstall.
-- [ ] 2. Удалён мёртвый код: write-only `BIND` в cmd_bench; `retries` — при
+- [x] 2. Удалён мёртвый код: write-only `BIND` в cmd_bench; `retries` — при
       имплементации: печать в cmd_watch только при ≠0 ИЛИ удалить поле
       (решение фиксируется в task-9.md).
-- [ ] 3. env.tpl: убрана строка COMPOSE_FILE (никто не читает, вводит в
+- [x] 3. env.tpl: убрана строка COMPOSE_FILE (никто не читает, вводит в
       заблуждение; осознанное изменение генерируемого .env — golden обновлён
       с явным diff в отчёте).
-- [ ] 4. Убран репо-дубль benchmarks/prompts/ (канон фикстуры — tpl/bench/;
+- [x] 4. Убран репо-дубль benchmarks/prompts/ (канон фикстуры — tpl/bench/;
       механизм prompts-маунта остаётся).
-- [ ] 5. Один канал форса гейта: флаг --force + документированный env-синоним;
+- [x] 5. Один канал форса гейта: флаг --force + документированный env-синоним;
       второй теневой var удалён/объединён; README освещает оба.
-- [ ] 6. Дубли сведены: общий предикат роута (один helper — источник для
+- [x] 6. Дубли сведены: общий предикат роута (один helper — источник для
       check_route И bench_route; тексты check_route не меняются); cmd_off
       переиспользует остановку cmd_down (одна реализация маркер+stop).
-- [ ] 7. Швы: cfgset возвращает rc + stderr-хвост (apply_profile warn'ит об
+- [x] 7. Швы: cfgset возвращает rc + stderr-хвост (apply_profile warn'ит об
       отказе ключей, не умирает); cmd_boot — force-recreate ВНУТРИ того же
       flock (без гонки); cur_model — мёртвый fallback удалён; keep в
       cmd_uninstall — local; usage() — извлечение справки маркерами/awk без
       жёстких номеров строк.
-- [ ] 8. Регресс: bash -n везде; shellcheck — новый базлайн-мультимножество
+- [x] 8. Регресс: bash -n везде; shellcheck — новый базлайн-мультимножество
       после удалений (зафиксировать в task-9.md); golden-файлы — осознанно
       обновлён только .env (COMPOSE_FILE), остальное байт-в-байт; CLI-parity
       (идентично, кроме п.3 и исчезновения warn-строк удалённых веток);
       install.sh sandbox; харнесы этапа 8 (pure funcs, ttft, bench-python)
       зелёные.
-- [ ] 9. spec/hfctl.md — addendum контрактов (cfgset-rc, route-helper, env без
+- [x] 9. spec/hfctl.md — addendum контрактов (cfgset-rc, route-helper, env без
       COMPOSE_FILE, форс-канал); README: --force + env-синоним.
 
 ### DoD (внешние, машины — только с GO пользователя)
