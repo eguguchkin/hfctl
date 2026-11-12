@@ -34,9 +34,11 @@ import curses
 import json
 import locale
 import os
+import shutil
 import signal
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 import urllib.request
@@ -158,28 +160,40 @@ def parse_metrics(text):
     return out
 
 
-def read_gpu():
+GPU_SPEC = (
+    # (поле, файл в hwmon*, делитель) — масштабы сверены вживу (che-FAEX1):
+    # freq1_input = Гц (600000000 = 600 MHz); power1_input = мкВт (µW,
+    # 5453000 = 5.5 W); vram/gtt — байты. gpu_busy_percent НЕ в hwmon-каталоге,
+    # а в card*/device/ — читается отдельно (read_gpu).
+    ('sclk_mhz', 'freq1_input', 1e6),
+    ('power_w', 'power1_input', 1e6),
+    ('vram_used', 'mem_info_vram_used', 1.0),
+    ('gtt_used', 'mem_info_gtt_used', 1.0))
+
+
+def read_gpu(base='/sys/class/drm'):
+    # @param 1: string  # каталог с card* (def /sys/class/drm; --selfcheck —
+    #   фейковое дерево)
     # @returns dict     # первая AMD-карта (vendor 0x1002): temp_c — max
-    #   temp1_input/1000 по всем её hwmon; sclk_mhz — freq1_input/1000,
-    #   power_w — power1_input/1e6, busy_pct — gpu_busy_percent,
+    #   temp1_input/1000 (миллиградусы) по всем её hwmon; sclk_mhz —
+    #   freq1_input/1e6 (Гц→MHz); power_w — power1_input/1e6 (мкВт→W);
+    #   busy_pct — card*/device/gpu_busy_percent (НЕ в hwmon-каталоге);
     #   vram_used/gtt_used — байты; каждое отсутствующее поле — None
     #   (dict целиком None — карты/датчиков нет)
-    for card in sorted(glob('/sys/class/drm/card[0-9]*')):
+    for card in sorted(glob(base + '/card[0-9]*')):
         if _read(card + '/device/vendor') != '0x1002':
             continue
         gpu = {'temp_c': None, 'sclk_mhz': None, 'power_w': None,
                'busy_pct': None, 'vram_used': None, 'gtt_used': None}
-        specs = (('sclk_mhz', 'freq1_input', 1000.0),
-                 ('power_w', 'power1_input', 1e6),
-                 ('busy_pct', 'gpu_busy_percent', 1.0),
-                 ('vram_used', 'mem_info_vram_used', 1.0),
-                 ('gtt_used', 'mem_info_gtt_used', 1.0))
+        busy = _num(_read(card + '/device/gpu_busy_percent'))
+        if busy is not None:
+            gpu['busy_pct'] = busy
         temps = []
         for hw in sorted(glob(card + '/device/hwmon/hwmon*/')):
             t = _num(_read(hw + 'temp1_input'))
             if t is not None:
                 temps.append(t)
-            for key, fname, scale in specs:
+            for key, fname, scale in GPU_SPEC:
                 if gpu[key] is None:
                     v = _num(_read(hw + fname))
                     if v is not None:
@@ -190,13 +204,14 @@ def read_gpu():
     return None
 
 
-def read_cpu_temp():
-    # @returns float    # Tctl °C — temp1_input/1e6 первого датчика k10temp;
-    #   нет датчика/чтения → None
-    for hw in sorted(glob('/sys/class/hwmon/hwmon*')):
+def read_cpu_temp(base='/sys/class/hwmon'):
+    # @param 1: string  # каталог с hwmon* (def /sys/class/hwmon)
+    # @returns float|None  # Tctl °C — temp1_input/1000 (миллиградусы,
+    #   1 знак) первого датчика k10temp; нет датчика/чтения → None
+    for hw in sorted(glob(base + '/hwmon*')):
         if _read(hw + '/name') == 'k10temp':
-            v = _num(_read(hw + 'temp1_input'))
-            return v / 1e6 if v is not None else None
+            v = _num(_read(hw + '/temp1_input'))
+            return round(v / 1000.0, 1) if v is not None else None
     return None
 
 
@@ -363,6 +378,11 @@ def fmti(x, q='?'):
     return q if x is None else str(int(x))
 
 
+def fmt_c(x):
+    # @returns string  # °C, 1 знак (Tctl: 35875 мК → 35.9C); None → '?'
+    return '?' if x is None else '%.1f' % x
+
+
 def fmt_uptime(s):
     # @param 1: float  # секунд аптайма
     # @returns string  # d/h/m (None → '-')
@@ -421,7 +441,7 @@ def fmt_plain(snap, d, ts):
     parts.append('gpu: %sC %sMHz %sW %s%%' % (
         fmti(gp.get('temp_c')), fmti(gp.get('sclk_mhz')),
         fmti(gp.get('power_w')), fmti(gp.get('busy_pct'))))
-    parts.append('cpu: %sC' % fmti(snap['cpu_temp_c']))
+    parts.append('cpu: %sC' % fmt_c(snap['cpu_temp_c']))
     return ts + '  ' + ' │ '.join(parts)
 
 
@@ -440,7 +460,7 @@ PLAIN_D = {'prefill': 84.2, 'decode': 75.3, 'served_delta': 1}
 PLAIN_FULL = ('12:00:00  queue: 0 │ served: 123 (+1) │ cache: 4421 │ '
               'errors: 2 │ retries: 1 │ prefill: 84.2 tok/s │ '
               'decode: 75.3 tok/s │ mem: 45.2/60.4 GiB │ swap: 0.2/8.0 GiB │ '
-              'gpu: 62C 1500MHz 18W 87% │ cpu: 54C')
+              'gpu: 62C 1500MHz 18W 87% │ cpu: 54.0C')
 PLAIN_SNAP_MIN = {
     'engine_ok': True,
     'stats': {'queue_depth': 0, 'requests_served': 5, 'retries_attempted': None},
@@ -456,11 +476,30 @@ PLAIN_MIN = ('12:00:00  queue: 0 │ served: 5 │ cache: - │ prefill: - tok/s
              'gpu: ?C ?MHz ?W ?% │ cpu: ?C')
 
 
+def status_bar_layout(W, interval, model, paused):
+    # @param 1: integer  # ширина терминала в знаках
+    # @returns (left, mid, right, x_mid, x_right)  # x_left фиксирован = 1
+    #   (за «●»); модель усечена так, чтобы поля не наезжали друг на друга
+    #   (контракт: на 80 колонок наложения нет); при узком W mid сдвигается
+    #   влево от права (деградация, put() всё равно обрезает)
+    prefix = 'hfctl watch │ модель '
+    mid = 'интервал %d c' % interval
+    right = 'логи: %s (p) │ q — выход' % ('пауза' if paused else 'live')
+    right_x = max(0, W - len(right) - 1)
+    mid_x = max(0, min(W // 2 - len(mid) // 2, right_x - len(mid) - 1))
+    model_w = mid_x - len(prefix) - 1
+    model = model[:model_w] if model_w > 0 else ''
+    return prefix + model, mid, right, mid_x, right_x
+
+
 def selfcheck():
     # @returns integer  # 0 — всё прошло; 1 — есть провалы (имена в stderr)
     fails = []
+    total = 0
 
     def ck(name, cond):
+        nonlocal total
+        total += 1
         if not cond:
             fails.append(name)
 
@@ -488,9 +527,55 @@ def selfcheck():
     ck('glyphs term dumb', choose_utf8('UTF-8', term='dumb') is False)
     ck('glyphs term empty', choose_utf8('UTF-8', term='') is False)
 
+    # Масштабы датчиков (сверено вживу на che-FAEX1) — фейковые деревья /sys
+    fake_hw = tempfile.mkdtemp(prefix='watch_tui_hw_')
+    fake_drm = tempfile.mkdtemp(prefix='watch_tui_drm_')
+    try:
+        def w(path, s):
+            with open(path, 'w') as f:
+                f.write(s + '\n')
+        hw0 = fake_hw + '/hwmon0'
+        os.makedirs(hw0)
+        w(hw0 + '/name', 'coretemp')  # не k10temp — поиск должен пройти мимо
+        hw3 = fake_hw + '/hwmon3'
+        os.makedirs(hw3)
+        w(hw3 + '/name', 'k10temp')
+        w(hw3 + '/temp1_input', '35875')  # миллиградусы → 35.9 °C
+        ck('cpu Tctl 35875→35.9', read_cpu_temp(fake_hw) == 35.9)
+        ck('cpu fmt 35.9/?', fmt_c(35.9) == '35.9' and fmt_c(None) == '?')
+
+        card = fake_drm + '/card0'
+        os.makedirs(card + '/device/hwmon/hwmon0')
+        w(card + '/device/vendor', '0x1002')
+        w(card + '/device/gpu_busy_percent', '0')  # НЕ в hwmon-каталоге
+        hw = card + '/device/hwmon/hwmon0'
+        w(hw + '/temp1_input', '54375')
+        w(hw + '/freq1_input', '600000000')  # Гц → 600 MHz
+        w(hw + '/power1_input', '5453000')   # мкВт → 5.453 W
+        gpu = read_gpu(fake_drm)
+        ck('gpu busy path card/device', gpu is not None and gpu['busy_pct'] == 0.0)
+        ck('gpu sclk 600000000→600', gpu is not None and gpu['sclk_mhz'] == 600.0)
+        ck('gpu power 5453000→5.453', gpu is not None and gpu['power_w'] == 5.453)
+        ck('gpu temp mK→C 54.375', gpu is not None and gpu['temp_c'] == 54.375)
+        card1 = fake_drm + '/card1'
+        os.makedirs(card1 + '/device/hwmon/hwmon1')
+        w(card1 + '/device/vendor', '0x8086')  # не AMD — карта не читается
+        w(card1 + '/device/hwmon/hwmon1/temp1_input', '99999')
+        ck('gpu non-AMD skip', read_gpu(fake_drm)['temp_c'] == 54.375)
+    finally:
+        shutil.rmtree(fake_hw)
+        shutil.rmtree(fake_drm)
+
+    left, mid, right, mid_x, right_x = status_bar_layout(
+        80, 2, 'qwen3.8:flash-next-mq4-xts', False)
+    ck('status bar 80 cols no overlap',
+       1 + len(left) <= mid_x
+       and mid_x + len(mid) <= right_x
+       and right_x + len(right) <= 80)
+
     for name in fails:
         print('selfcheck FAIL: %s' % name, file=sys.stderr)
-    print('selfcheck: %d/%d ok' % (15 - len(fails), 15))
+    print('selfcheck: %d/%d ok' % (total - len(fails), total))
     return 1 if fails else 0
 
 
@@ -699,11 +784,11 @@ class Watch:
         win.erase()
         g = self.glyphs
         put(win, 0, 0, g.dot, self.attr(C_GREEN if snap['engine_ok'] else C_RED))
-        put(win, 0, 1, 'hfctl watch │ модель ' + self.model)
-        mid = 'интервал %d c' % self.interval
-        put(win, 0, max(0, W // 2 - len(mid) // 2), mid)
-        right = 'логи: %s (p) │ q — выход' % ('пауза' if self.paused else 'live')
-        put(win, 0, max(0, W - len(right) - 1), right)
+        left, mid, right, mid_x, right_x = status_bar_layout(
+            W, self.interval, self.model, self.paused)
+        put(win, 0, 1, left)
+        put(win, 0, mid_x, mid)
+        put(win, 0, right_x, right)
         if H < 4 or W < 8:
             return
         # зона логов: min 6 (H≥24) / min 3 (H<24), (H−1)//4 снизу
@@ -796,7 +881,7 @@ class Watch:
                 ('busy', fmti(gp.get('busy_pct')) + '%', busy_attr),
                 ('power', fmti(gp.get('power_w')) + ' W'),
                 ('GPU temp', fmti(gp.get('temp_c')) + g.deg),
-                ('Tctl', fmti(cpu) + g.deg, cpu_attr)]
+                ('Tctl', fmt_c(cpu) + g.deg, cpu_attr)]
 
     def rows_speed(self, snap, d, W):
         m = snap['metrics'] or {}

@@ -184,3 +184,80 @@
   в /tmp и описано в «How it was checked».
 - **Наблюдаемость**: при желании апстрим-логирование жизненного цикла запроса
   (hflab fact «движок не логирует»); к этому сабстэджу отношения не имеет.
+
+## Round 1 (2026-11-12): fix по внешней приёмке (EXP-001 capture, che-FAEX1)
+
+Файл: только `tpl/python/watch_tui.py` (110+/25-). Всё остальное не тронуто;
+исправления строго по нумерованному списку review, без переделки остального.
+
+1. **`read_cpu_temp()`: слеш + масштаб.**
+   - Было: `_read(hw + 'temp1_input')` (пропущен слеш → путь
+     `hwmon3temp1_input`, Tctl всегда `?`) и деление на 1e6.
+   - Стало: `_read(hw + '/temp1_input')`, `/1000.0` (миллиградусы) +
+     `round(…, 1)`. Отображение Tctl — 1 знак: новый `fmt_c()` (1 знак,
+     `None → '?'`), `rows_hardware` `('Tctl', fmt_c(cpu) + g.deg, …)` и plain
+     `cpu: %sC` — оба через `fmt_c`. Ожидаемо на FAEX1: `Tctl: 35.9°C`
+     (35875 → 35.9).
+   - Проверено: selfcheck-кейс `cpu Tctl 35875→35.9` на фейковом дереве
+     `/sys/class/hwmon` (hwmon0=coretemp — поиск идёт мимо, hwmon3=k10temp) +
+     `cpu fmt 35.9/?`. Реальное отображение только на FAEX1 (EXP).
+2. **`read_gpu()` sclk: Гц, не кГц.** Масштаб `freq1_input` 1000 → **1e6**.
+   - Проверено: selfcheck-кейс `gpu sclk 600000000→600` (фейковое дерево
+     `/sys/class/drm`; `read_gpu(base=…)` теперь принимает каталог — дефолт
+     `/sys/class/drm`, selfcheck живой /sys не трогает).
+3. **`read_gpu()` busy: путь `card*/device/gpu_busy_percent`.** Чтение вынесено
+   из hwmon-цикла (там файла нет — FACTS «Датчики на che-FAEX1») в отдельное
+   `_read(card + '/device/gpu_busy_percent')`; `busy_pct` удалён из
+   specs-таблицы (таблица стала константой `GPU_SPEC`).
+   - Проверено: selfcheck-кейс `gpu busy path card/device` (busy=0 читается).
+   - Не проверено: живой idle=0 → `busy: 0%` на FAEX1 — EXP-001.
+4. **Статус-бар: наложение «модель»/«интервал».** Геометрия вынесена в
+   `status_bar_layout(W, interval, model, paused)` (возвращает поля + x-коорды;
+   x_left=1 фиксирован): mid центрируется как раньше, но не далее
+   `right_x - len(mid) - 1` (на узком W сдвиг влево от права); **модель
+   усечается** до `mid_x - len(prefix) - 1` знаков — на 80 колонках
+   `qwen3.8:flash-next-mq4-xts` → `qwen3.8:flas` (12 зн.); поля
+   «интервал N c», «логи: live (p)», «q — выход» целы, наложений нет.
+   Минимально: перенос интервала на отдельное поле не делался.
+   - Проверено: selfcheck-кейс `status bar 80 cols no overlap`
+     (`1+len(left) ≤ mid_x`, `mid_x+len(mid) ≤ right_x`, правое поле влезает
+     в 80) + **pty-чек 80×24** (`/tmp/pty_statusbar.py`, не в репо): в capture
+     строка 0 = `●hfctl watch │ модель qwen3.8:flasинтервал 1 c … q — выход`,
+     хвоста модели (`ts`) после mid нет, Traceback=0, все 6 assert PASS.
+5. **Docstring'и.** `read_gpu`: `sclk_mhz — freq1_input/1e6 (Гц→MHz)`,
+   `power_w — power1_input/1e6 (мкВт→W)`, `busy_pct — card*/device/… (НЕ в
+   hwmon)`; `GPU_SPEC` — комментарий с живыми цифрами FAEX1. `read_cpu_temp`:
+   `temp1_input/1000 (миллиградусы, 1 знак)`. `power1_input` = **мкВт (µW)** —
+   текущий `/1e6` был правильный, код не тронут; docstring указывает мкВт.
+6. **`--selfcheck`: 8 новых кейсов по 1–4** (15 → **23**, счётчик
+   динамический): `cpu Tctl 35875→35.9`, `cpu fmt 35.9/?`,
+   `gpu busy path card/device`, `gpu sclk 600000000→600`,
+   `gpu power 5453000→5.453`, `gpu temp mK→C`, `gpu non-AMD skip`
+   (карта 0x8086 не читается), `status bar 80 cols no overlap`.
+   Фейковые деревья — `tempfile.mkdtemp`, rmtree в finally.
+
+### Внутренние проверки (round 1)
+
+- `bash -n hfctl install.sh lib/*.sh` — ok.
+- `python3 -m py_compile tpl/python/*.py` — ok.
+- `python3 tpl/python/watch_tui.py --selfcheck` — **23/23 ok, rc 0**.
+- pty-чек статус-бара 80×24 (мёртвый порт, interval 1, модель из capture):
+  **6/6 PASS**, Traceback=0.
+- Регрессия полная, как в round 1: `hfctl` без аргументов → usage (rc=0 —
+  pre-existing, «Ограничения» 2); `HFCTL_PORT=19999 hfctl status --json` →
+  корректный отказ `{"… "health": null}`, rc 0; stdlib-импорты — только
+  stdlib (добавлены `shutil`, `tempfile` — оба stdlib); `tpl/bench/`,
+  `spec/state.md` не тронуты; в дифе только `tpl/python/watch_tui.py`.
+- **Не проверено внутренне** (только FAEX1): реальные цифры Tctl/sclk/busy
+  в TUI-рендере и plain-строке (`sclk: 600 MHz`, `Tctl: 35.9°C`, `busy: 0%`),
+  живые логи — EXP-001..003 (EXP-перепуск — оркестратор + тестер после GO).
+
+### Out-of-scope proposals (round 1)
+
+- **FACTS.md (hfctl flow)**: в разделе «Host sysfs» зафиксировано
+  `freq1_input (кГц)`, `power1_input (мВт)` — живые цифры из «Датчики на
+  che-FAEX1» (Гц, µW) с ним противоречат. Факты правит оркестратор — сюда
+  не трогал.
+- **GPU temp — целые градусы** (`fmti`): Tctl теперь 1 знак (требование),
+  GPU temp в обоих рендерах остался integer (54.375 → «54C»). Если нужен
+  тот же 1 знак — отдельная правка (не в нумерованном списке, не делал).

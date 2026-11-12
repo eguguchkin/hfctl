@@ -51,6 +51,20 @@
 - Python-харнесы: 15 файлов в `tpl/python/` — python3 обязателен на целевой
   машине, stdlib-подход принят в репо.
 
+## Датчики на che-FAEX1 (проверено оркестратором вживую, 2026-11-12)
+- `amdgpu` hwmon живёт в `/sys/class/drm/card0/device/hwmon/hwmon7`;
+  `freq1_input` = **Гц** (600000000 = 600 МГц), `power1_input` = мВт,
+  `gpu_busy_percent` = `/sys/class/drm/card0/device/gpu_busy_percent`
+  (НЕ в hwmon-каталоге).
+- CPU Tctl (k10temp) — в `/sys/class/hwmon/hwmon3` (name=k10temp),
+  `temp1_input`/`temp1_label`; пути `/sys/class/drm/card*/device/hwmon`
+  его НЕ содержат — искать надо по `/sys/class/hwmon/hwmon*/name`.
+- tmux-окно исполняет команду БЕЗ .bashrc (не интерактивный shell) →
+  `~/.local/bin` в PATH нет (login-shell добавляет через .profile);
+  `hfctl watch` в tmux без явного PATH/полного пути → rc=127.
+- PATH-фикс на FAEX1 сделан: `export PATH="$HOME/.local/bin:$PATH"`
+  в `~/.bashrc` (подсказка install.sh, как рекомендовано продуктом).
+
 ## Контекст
 - Движок имеет собственный `hipfire tui` (ratatui,
   `/workspace/hipfire/crates/hipfire-tui/`), но он в контейнере: не видит
