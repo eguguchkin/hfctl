@@ -1,0 +1,1 @@
+RESULT: BLOCKED — stdin не TTY — скрипт запускать ssh -t (нужна настоящая TTY-сессия)

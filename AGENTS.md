@@ -21,6 +21,27 @@ gfx11xx). Никакой привязки к конкретной инфраст
   зафиксирован (`BENCH_FIXTURE_MD5` в `lib/bench.sh`), не редактировать байты
   (любая правка меняет хеш и сравнимость замеров).
 
+## Development protocol: dev-flow
+
+- **Blackboard**: `/workspace/hfctl/flow/` (layout: STATE.md, history.md,
+  SPEC.md, FACTS.md, DECISIONS.md, `<stage>/<sub-stage>/`, `external/`).
+- **Internal checks** (роли запускают сами): `bash -n hfctl lib/*.sh`;
+  `python3 -m py_compile tpl/python/*.py`; `hfctl` без аргументов → usage, rc=1;
+  `hfctl status --json` с подменой PORT на чанковый (отказ должен быть
+  корректным, не крашем). Зависимостей нет — ничего ставить.
+- **External checks** (BLOCKED-EXTERNAL): всё, что требует живого контейнера/
+  хоста — TUI на SSH-TTY, реальные /sys-датчики, `podman logs`, живой /stats;
+  приёмка на реальных машинах только через EXP-скрипты + явное GO пользователя.
+- **Environment hygiene**: роли НЕ делают ssh/podman наружу, не трогают
+  /workspace/hflab, не правят `tpl/bench/merge_sort_thinking_off.txt` (md5
+  канон), не коммитят (коммиты — оркестратор после закрытия сабстэджа),
+  не правят `spec/state.md` (обновляет оркестратор статусным коммитом).
+- **Code conventions**: диспетчер `hfctl` + `lib/*.sh` + `tpl/`; bash-комментарии
+  с `# Назначение / Побочные эффекты / Ограничения / @param / @stdout / @returns`
+  на русском (домашний стиль `lib/commands.sh`); python — только stdlib,
+  один файл = одна роль в `tpl/python/`; в репо нет IP, имён хостов, путей
+  ключей (правило 7).
+
 ## Правила разработки
 
 1. Начинаешь работу — прочитай `spec/state.md`; любой коммит, меняющий

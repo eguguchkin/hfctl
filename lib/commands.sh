@@ -239,64 +239,30 @@ cmd_logs() {
   podman logs $follow -t --tail "$n" "$CONTAINER" 2>&1
 }
 
-# Назначение: °C самой горячей AMD-карты (vendor 0x1002) — максимум по
-#   temp1_input всех её hwmon-датчиков; чтение /sys — на хосте (в
-#   контейнере этих файлов нет).
+# Назначение: `hfctl watch [--interval N]` — живой дашборд обработки:
+#   на TTY — TUI (блоки движок/железо/скорость/память/логи, клавиши
+#   q, +/-, p); в пайп/файле — БЕСУСЛОВНАЯ строка полного среза раз в N c.
+#   Данные (/stats, /metrics, host /sys, /proc, `podman logs -f`) — целиком
+#   в python tpl/python/watch_tui.py; bash только разбирает аргументы.
 #
-# Побочные эффекты: только печать числа в stdout; читает
-#   /sys/class/drm/card*/device/{vendor,hwmon/hwmon*/temp1_input}; ничего
-#   не меняет.
+# Побочные эффекты: разбор --interval (die при ошибке), чтение
+#   HIPFIRE_MODEL из $STACK_DIR/.env, `exec python3` — bash замещается
+#   процессом python (rc = rc python; SIGINT/SIGTERM уходят в python).
+#   Файлов и состояния стека не меняет.
 #
-# Ограничения/допущения: без параметров. Локалы одной строкой: card/hw —
-#   пути /sys; v — строка vendor ('' при нечитаемом файле); t/max —
-#   миллиградусы целыми ('' — датчик ещё не найден; нечисловые чтения
-#   пропускаются). Без доступных AMD-датчиков — пустой stdout и rc 1
-#   (вызывающий cmd_watch глушит это `|| true`).
-#
-# @stdout integer   # целые °C (максимум/1000 вниз); пусто — карта/датчик не видны
-# @returns integer  # 0 — число напечатано; 1 — ни одного датчика не найдено
-gpu_temp() {
-  local card hw v t max=""
-  for card in /sys/class/drm/card[0-9]*; do
-    [ -r "$card/device/vendor" ] || continue
-    case "$(cat "$card/device/vendor" 2>/dev/null || true)" in 0x1002) ;; *) continue ;; esac
-    for hw in "$card"/device/hwmon/hwmon*/; do
-      [ -r "${hw}temp1_input" ] || continue
-      t=$(cat "${hw}temp1_input" 2>/dev/null || true)
-      case "$t" in ''|*[!0-9]*) continue ;; esac
-      if [ -z "$max" ] || [ "$t" -gt "$max" ]; then max="$t"; fi
-    done
-  done
-  [ -n "$max" ] && echo "$((max / 1000))"
-}
-
-# Назначение: `hfctl watch [--interval N]` — живой наблюдатель обработки:
-#   /stats + /metrics + температура GPU («агент работает, а в логах
-#   тишина» — очередь и виден факт обработки).
-#
-# Побочные эффекты: бесконечный цикл тиков — на каждый: curl GET /stats и
-#   /metrics (по 3 с таймаут), python3 (watch_stats.py) и awk для разбора,
-#   gpu_temp (чтение /sys), sleep interval; строки событий и heartbeat в
-#   stdout. Файлов и состояния стека не меняет.
-#
-# Ограничения/допущения: требует глобалы PORT, TPL_DIR (диспетчер), isint
-#   и gpu_temp этого файла. Интервал — целое ≥ 1 с (иначе die, exit 1);
-#   обе формы: --interval N и --interval=N. Локалы: interval — целые
-#   секунды (default 2); now/last_print/last_down — unix-время (last_down
-#   -999 = сервер ещё не «падал»); q/served/recent/retries/cache/fails и
-#   prev_* — числа строками либо '-'/'' когда данных нет; retries печатается
-#   в строку («│ ретраи: N») только при целом ≠0 (transient-ретраи движка
-#   нигде больше не видны); prev_* при
-#   недоступности сервера сбрасываются в '' (после поднятия печатается
-#   свежая строка без ложных дельт). read из python заглушён `|| true`:
-#   при пустом выводе счётчики остаются '-'.
+# Ограничения/допущения: требует глобалы PORT, CONTAINER, TPL_DIR,
+#   STACK_DIR (диспетчер) и isint. Интервал — целое ≥ 1 с (иначе die,
+#   exit 1); обе формы: --interval N и --interval=N. Передача в python —
+#   ТОЛЬКО env (HFCTL_WATCH_*), без argv: режим TUI/plain python решает
+#   сам по isatty(). model из .env может быть пустым — python заменит на
+#   '-'; `sed … || true` — защита от set -euo pipefail (не-совпадение/нет
+#   файла не должно убивать диспетчер). Локалы: interval — целые секунды
+#   (default 2); model — строка HIPFIRE_MODEL из .env ('' — нет).
 #
 # @param 1..N: string[] # флаги: --interval N | --interval=N (default 2 с, целое ≥ 1)
-# @stdout string        # строки событий (очередь/обслужено/кэш/done tok-s/ошибки/ретраи/GPU) и heartbeat простоя
-# @returns integer      # не возвращается — вечный цикл; ошибки аргументов: die (exit 1)
+# @stdout string        # весь вывод watch (TUI на TTY или plain-строки) — из python
+# @returns integer      # не возвращается — exec python3; ошибки аргументов: die (exit 1)
 cmd_watch() {
-  # Философия тихого стриминга: строка только на ИЗМЕНЕНИИ видимых счётчиков,
-  # в простое — heartbeat раз в 60 c; недоступность — каждые 30 c, самолечение.
   local usage="использование: hfctl watch [--interval N]" interval=2
   while [ $# -gt 0 ]; do
     case "$1" in
@@ -309,70 +275,11 @@ cmd_watch() {
   isint "$interval" || die "интервал должен быть целым числом секунд"
   [ "$interval" -ge 1 ] || die "интервал должен быть ≥ 1 с"
 
-  local now ts temp line q served recent retries mval cache fails
-  local prev_q="" prev_served="" prev_cache="" prev_fails=""
-  local last_print=0 last_down=-999
-  while :; do
-    now=$(date +%s)
-    temp=$(gpu_temp || true)
-    q="-"; served="-"; recent="-"; retries="-"; cache=""; fails=""
-    mval=$(curl -fsS -m 3 "http://127.0.0.1:$PORT/stats" 2>/dev/null || true)
-    if [ -z "$mval" ]; then
-      # недоступность: первое сообщение сразу, дальше раз в ~30 c; база
-      # сравнения сбрасывается на КАЖДОМ тике простоя — после поднятия
-      # всегда печатается свежая строка без ложных дельт
-      if [ $((now - last_down)) -ge 30 ]; then
-        ts=$(date +%H:%M:%S)
-        echo "$ts сервер недоступен (нет /stats на :$PORT); жду…"
-        last_down=$now; last_print=$now
-      fi
-      prev_q=""; prev_served=""; prev_cache=""; prev_fails=""
-      sleep "$interval"; continue
-    fi
-    read -r q served recent retries <<<"$(printf '%s' "$mval" | python3 "$TPL_DIR/python/watch_stats.py" || true)"
-    mval=$(curl -fsS -m 3 "http://127.0.0.1:$PORT/metrics" 2>/dev/null || true)
-    cache=$(printf '%s\n' "$mval" | awk -v p="hipfire_cached_prompt_tokens_total" '$1==p{print $2; exit}')
-    fails=$(printf '%s\n' "$mval" | awk -v p="hipfire_requests_failed_total" '$1==p{print $2; exit}')
-    cache=${cache%.*}; fails=${fails%.*}
-
-    if [ "$q" != "$prev_q" ] || [ "$served" != "$prev_served" ] \
-       || [ "${cache:-}" != "$prev_cache" ] || [ "${fails:-}" != "$prev_fails" ]; then
-      ts=$(date +%H:%M:%S)
-      line="$ts  очередь: $q │ обслужено: $served"
-      if isint "$served" && isint "$prev_served" && [ "$served" -gt "$prev_served" ]; then
-        line+=" (+$((served - prev_served)))"
-        # дельта кэша — только ненулевая: гонка тиков (кэш обновился раньше
-        # счётчика обслуженных) не порождает «(+0 tokens)»
-        if isint "$cache" && isint "$prev_cache" && [ "$((cache - prev_cache))" -gt 0 ]; then
-          line+=" │ кэш: $cache (+$((cache - prev_cache)) tokens)"
-        elif [ -n "$cache" ]; then
-          line+=" │ кэш: $cache"
-        fi
-      elif [ -n "$cache" ]; then
-        line+=" │ кэш: $cache"
-      fi
-      line+=" │ done: $recent tok/s"
-      if isint "$fails" && [ "$fails" -gt 0 ]; then line+=" │ ошибки: $fails"; fi
-      # transient-ретраи движка (/stats retries_attempted) — видны только тут;
-      # «-» (нет данных) не печатается: isint отсекает не-целое
-      if isint "$retries" && [ "$retries" -ne 0 ]; then line+=" │ ретраи: $retries"; fi
-      if [ -n "$temp" ]; then line+=" │ GPU: ${temp}°C"; else line+=" │ GPU: ?"; fi
-      echo "$line"
-      last_print=$now
-      prev_q="$q"; prev_served="$served"; prev_cache="${cache:-}"; prev_fails="${fails:-}"
-    elif [ $((now - last_print)) -ge 60 ]; then
-      ts=$(date +%H:%M:%S)
-      if [ "$q" = "0" ]; then
-        echo "$ts обменов нет (очередь: 0, обслужено: $served, GPU: ${temp:-?}°C)"
-      else
-        # долгая генерация не меняет счётчик served почти минуту —
-        # «тишина» тут значит «работает», и это надо произнести
-        echo "$ts обработка идёт (очередь: $q, обслужено: $served, GPU: ${temp:-?}°C)"
-      fi
-      last_print=$now
-    fi
-    sleep "$interval"
-  done
+  local model=""
+  model=$(sed -n 's/^HIPFIRE_MODEL=//p' "$STACK_DIR/.env" 2>/dev/null | head -n 1 || true)
+  HFCTL_WATCH_PORT="$PORT" HFCTL_WATCH_INTERVAL="$interval" \
+  HFCTL_WATCH_CONTAINER="$CONTAINER" HFCTL_WATCH_MODEL="$model" \
+  exec python3 "$TPL_DIR/python/watch_tui.py"
 }
 
 # Назначение: скрытый алиас совместимости `hfctl mode single|slots [N]` ==
