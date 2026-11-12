@@ -2,3 +2,4 @@
 *.swp
 *~
 .local-analysis/
+tpl/python/__pycache__/
