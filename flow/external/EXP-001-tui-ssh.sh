@@ -28,6 +28,14 @@
 #   ≥1 строку (стартовые строки контейнера), не «(ждём логи…)» и не
 #   «логи недоступны».
 #
+# ВАЖНО (фикс 2026-11-13, fix-цикл 2 round 2 — ложный FAIL): в 80×24
+#   capture заголовок лог-зоны — ПОЛНАЯ строка рамки «│ логи … │» (правая
+#   граница есть); старый старт-условие lstrip().startswith('логи') его не
+#   распознавал (первый символ «│») → зона [] → ложный FAIL. Парсер теперь
+#   учитывает обе формы (рамка/упрощённый); самопроверка парсера на
+#   mini-фикстурах идёт ПЕРЕД анализом: провал → RESULT: ERROR — парсер
+#   (НЕ FAIL — продукт не виноват).
+#
 # Команда запуска:
 #   ssh -t <host> 'bash -s' < flow/external/EXP-001-tui-ssh.sh
 #
@@ -94,7 +102,7 @@ tmux ${TMOPT[@]} kill-server 2>/dev/null || true
 say "tmux-сессия закрыта"
 
 # анализ
-python3 - "$RES.cap1.txt" "$RES.cap3.txt" >>"$RES" 2>&1 <<'PYEOF' || true
+python3 - "$RES.cap1.txt" "$RES.cap3.txt" >>"$RES" 2>&1 <<'PYEOF'
 import re, sys
 c1, c3 = open(sys.argv[1]).read(), open(sys.argv[2]).read()
 fails = []
@@ -110,20 +118,46 @@ elif 'интервал' in row0:
     i = row0.index('интервал')
     if i < 1 or row0[i-1] != ' ':
         fails.append('нет разрыва 1 кол. перед «интервал»: %r' % row0)
-# зона логов: строка «  логи», далее контент до нижней рамки
+# зона логов: заголовок «  логи…» (упрощённый) или «│ логи … │» (рамка —
+# полная 80-колоночная строка capture, правая граница есть); контент до
+# нижней рамки («└…»/«+--…», условие не менялось); левая рамка «│» +
+# отступ / 2 пробела — срез, правая «│» отбрасывается (безвредна).
 def logzone_lines(cap):
-    out, started = [], False
+    out, started, framed = [], False, False
     for ln in cap.splitlines():
         s = ln.rstrip()
+        core = s.lstrip()
         if started:
-            if s.lstrip().startswith(('└', '+--')):
+            if core.startswith(('└', '+--')):
                 break
-            body = s[2:] if s.startswith('  ') else s.lstrip()
-            out.append(body.strip())
+            if framed:
+                body = core[1:].lstrip() if core[:1] == '│' else core
+            else:
+                body = s[2:] if s.startswith('  ') else core
+            out.append(body.rstrip('│+').rstrip())
             continue
-        if s.lstrip().startswith('логи'):
+        if core.startswith('логи'):
             started = True
+        elif core[:1] == '│' and core[1:].lstrip().startswith('логи'):
+            started, framed = True, True
     return out
+# самопроверка парсера (до анализа): mini-фикстуры обеих форм capture —
+# «рамка 80 кол» и «упрощённый (без рамок)»; парсер обязан найти ≥1 строку
+# на обоих, правая рамка должна отбрасываться. Провал — RESULT: ERROR —
+# парсер (скрипт сломан сам по себе, НЕ FAIL продукта).
+def _z(c):
+    return [l for l in logzone_lines(c) if l]
+FIX_FRAMED = ('│ логи' + ' ' * 73 + '│\n'
+              '│ 12:00:01 seed-line-A' + ' ' * 40 + '│\n'
+              '│ 12:00:05 seed-line-B' + ' ' * 40 + '│\n'
+              '└' + '─' * 78 + '┘\n')
+FIX_PLAIN = ('  логи\n  12:00:01 seed-line-A\n  12:00:05 seed-line-B\n'
+             '+' + '-' * 78 + '+\n')
+_zf, _zp = _z(FIX_FRAMED), _z(FIX_PLAIN)
+if len(_zf) < 1 or any('│' in l for l in _zf) or len(_zp) < 1:
+    print('АНАЛИЗ: ERROR — парсер: самопроверка не прошла '
+          '(framed=%r, plain=%r)' % (_zf, _zp))
+    sys.exit(1)
 zone = [l for l in logzone_lines(c1)
         if l and l != '(ждём логи…)' and not l.startswith('логи недоступны')]
 if not zone:
@@ -149,6 +183,8 @@ PYEOF
 
 if grep -q '^АНАЛИЗ: все критерии' "$RES"; then
   say "RESULT: PASS — TUI 80x24: 5 блоков + статус-бар (без наложений), сид-строки логов, Tctl, честные метрики D8 (prefill avg > 0, decode последний — число)"
+elif grep -q '^АНАЛИЗ: ERROR' "$RES"; then
+  say "RESULT: ERROR — парсер лог-зоны: самопроверка на mini-фикстурах не прошла (продукт не виноват; см. $RES)"
 else
   say "RESULT: FAIL — см. АНАЛИЗ в $RES"
 fi
