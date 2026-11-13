@@ -1,15 +1,16 @@
-# STATE — hfctl watch (dev-flow)
+# STATE — hfctl engine/0.4.6 (dev-flow)
 
-- Сабстэдж: `watch/polish` — **ЗАКРЫТ (2026-11-13)**: reviewer APPROVED
-  round 2; tester round 1 внутреннее 0 FAIL; EXP-001 PASS на машине B
-  (один прогон на конец пакета по D12; фикс log_h=4 — EXP не затронут);
-  tester в фикс-раунде пропущен по D11 (запись в history)
-- Предыдущий: `watch/watch-tui` — закрыт 2026-11-13 (APPROVED round 3)
-- Следующий шаг: пуш пользователя (11afed2 + 4ac36c4) → доставка на машину B
-  (pull + install.sh, без recreate и без перепуска EXP по D12) → selfcheck
-  в TTY 42/42 → статусный коммит spec/state.md (сделан) + hflab (сделан)
-- Бэклог (некритичные, не блокируют): markdown-склейка spec/hfctl.md:60–61;
-  `hfctl status` rc=127 без podman (pre-existing lib/); selfcheck-кейс
-  «log tail visible» привязан к log_h=5; прежние: дробность GPU temp
-  (решено — оставить как есть), usage rc=1 — сделано в этом сабстэдже.
-- Открытые вопросы к спеке (review round 1): нет новых.
+- Сабстэдж: `engine/0.4.6` (предыдущий `watch/polish` — ЗАКРЫТ 2026-11-13,
+  доставлен на машину B, selfcheck TTY 42/42)
+- Статус: **brief готов; лабораторная приёмка начата**: образ 0.4.6 скачан
+  на машину B (digest ab388091…); факты — hflab flow/recon/0.4.6-recon.md.
+  Прерывание машины B — ждёт GO пользователя (живой трафик 2026-11-14 02:2x)
+- Вилка: механический пин + доки → D11 лёгкий режим (task оркестратора после
+  зелёной лаборатории; tester пропускается с записью; reviewer обязателен)
+- Следующий шаг (по GO пользователя): п.1 DoD на машине B (HFCTL_IMAGE
+  канал) → п.2 che-evo → task оркестратора → developer (пин+доки) →
+  reviewer → пуш → доставка
+- Открытые внешние эксперименты: EXP-B (машина B: fn-lanes/smoke/bench),
+  EXP-EVO (che-evo: dflash/smoke/bench ×3) — новые, формат hflab
+- Пуш-состояние hfctl: локально bb8b8ad (journal доставки) не запушен —
+  пойдёт следующим пакетом
