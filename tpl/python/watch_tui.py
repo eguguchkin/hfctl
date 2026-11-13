@@ -760,6 +760,53 @@ def selfcheck():
            'Served', 'Retries', 'Cache'])
     ck('KV pages dash', ('KV pages', '-') in w.rows_memory(fix, 80))
 
+    # Контент лог-зоны при log_h = 3 НЕ рисуется (review round 2, блокер #1):
+    # срез log_view[-(log_h-3)] при log_h=3 = [-0:] = весь буфер, и первая
+    # строка печаталась по нижней рамке «Логи». Кейсы с НЕПУСТЫМ log_view на
+    # размерах, где лог-зона сжимается в минимум (60×15 / 40×10 / 80×16):
+    # нижняя рамка обязана остаться целой. Fake-окно — минимальный curses
+    # интерфейс, который использует draw() (getmaxyx/erase/addstr).
+    class FakeWin:
+        def __init__(self, width, height):
+            self.w, self.h = width, height
+            self.grid = [[' '] * width for _ in range(height)]
+
+        def getmaxyx(self):
+            return (self.h, self.w)
+
+        def erase(self):
+            self.grid = [[' '] * self.w for _ in range(self.h)]
+
+        def addstr(self, y, x, s, attr=0):
+            for i, ch in enumerate(s):
+                if 0 <= y < self.h and 0 <= x + i < self.w:
+                    self.grid[y][x + i] = ch
+
+    gw = w.glyphs
+    d0 = {'prefill': None, 'decode': None, 'served_delta': 0}
+    for W_, H_ in ((60, 15), (40, 10), (80, 16)):
+        fw = FakeWin(W_, H_)
+        w.log_view = ['LOG-A', 'LOG-B', 'LOG-C']
+        w.draw(fw, W_, H_, fix, d0)
+        # сравнение внутренней части нижней рамки (колонки 1..W−2): правый
+        # угол put отсекает по краю окна, rstrip по нему неиндикативен
+        bottom = ''.join(fw.grid[H_ - 1])
+        ck('log frame intact at log_h=3 (%d×%d)' % (W_, H_),
+           bottom[1:W_ - 1] == gw.h * (W_ - 2))
+    # log_h ≥ 4 (80×24 с fix-снапом → 5): хвост буфера виден, свежие строки
+    # снизу, рамка цела
+    fw = FakeWin(80, 24)
+    w.log_view = ['LOG-A', 'LOG-B', 'LOG-C', 'LOG-D', 'LOG-E']
+    w.draw(fw, 80, 24, fix, d0)
+    grid_rows = [''.join(r) for r in fw.grid]
+    # строки контента: x=2 (после «│ » рамки); правый борт рамки остаётся
+    # на месте — контент его не перекрывает
+    ck('log tail visible at log_h=4+',
+       grid_rows[22][2:].startswith('LOG-E')
+       and grid_rows[21][2:].startswith('LOG-D')
+       and grid_rows[23][1:78] == gw.h * 77)
+    w.log_view = []
+
     for name in fails:
         print('selfcheck FAIL: %s' % name, file=sys.stderr)
     print('selfcheck: %d/%d ok' % (total - len(fails), total))
@@ -1019,11 +1066,13 @@ class Watch:
                        self.rows_memory(snap, W))
         self.box(win, 0, log_top, W, log_h)
         put(win, log_top + 1, 2, 'Логи')
-        # «(ждём логи…)» — только пока и сид пуст, и новых строк нет (D9),
-        # и есть строка для контента (log_h ≥ 4; при минимуме 3 — зона =
-        # рамка + «Логи» + рамка); сид/стрим упали (нет podman/контейнера)
+        # Контент И «(ждём логи…)» — только при log_h ≥ 4 (при минимуме 3
+        # зона = рамка + «Логи» + рамка, строки для контента нет: срез
+        # [-(log_h-3)] при log_h=3 это [-0:] = весь буфер, первая строка
+        # легла бы на нижнюю рамку). Placeholder — только пока сид пуст и
+        # новых строк нет (D9); сид/стрим упали (нет podman/контейнера)
         # — та же строка, без трейса
-        if self.log_view:
+        if self.log_view and log_h >= 4:
             lines = self.log_view[-(log_h - 3):]
             for i, ln in enumerate(lines):
                 put(win, log_top + 2 + i, 2, ln)
