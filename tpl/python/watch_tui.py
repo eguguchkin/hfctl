@@ -938,19 +938,19 @@ class Watch:
 
     def rows_engine(self, snap):
         g = self.glyphs
-        # Обязательные по DoD 1 (модель/uptime/очередь/обслужено/τ) —
+        # Обязательные по DoD 1 (модель/uptime/очередь/ошибки/τ) —
         # первыми: на 80×24 у блока 5 строк, block() отбрасывает ХВОСТ —
-        # бьёт только необязательные (ошибки/ретраи/кэш).
+        # бьёт только необязательные (обслужено/ретраи/кэш).
         st = snap['stats'] or {}
         m = snap['metrics'] or {}
         rows = [('модель', self.model),
                 ('uptime', fmt_uptime(snap['uptime_s'])),
-                ('очередь', fmti(st.get('queue_depth'), '-')),
-                ('обслужено', fmti(st.get('requests_served'), '-')),
-                (g.tau + ' avg', fmt1(avg_of(m, 'hipfire_spec_tau')))]
+                ('очередь', fmti(st.get('queue_depth'), '-'))]
         fails = m.get('hipfire_requests_failed_total')
         if fails is not None and fails > 0:
             rows.append(('ошибки', str(int(fails)), self.attr(C_RED)))
+        rows.append((g.tau + ' avg', fmt1(avg_of(m, 'hipfire_spec_tau'))))
+        rows.append(('обслужено', fmti(st.get('requests_served'), '-')))
         retr = st.get('retries_attempted')
         if retr is not None and retr != 0:
             rows.append(('ретраи', str(int(retr)), self.attr(C_RED)))
@@ -992,8 +992,8 @@ class Watch:
         mem = snap['mem']
         avail, total = mem.get('available_gib'), mem.get('total_gib')
         # bar настолько узок, что полный value «<avail>/<total> GiB»
-        # (worst case 9 знаков «128.6/999.9») влезает в рамку блока
-        # col_w=40 на 80×24: 1+width+1+9+4 ≤ col_w−8
+        # (worst case 11 знаков «128.6/999.9») влезает в рамку блока
+        # col_w=40 на 80×24: 1+width+1+11+4 ≤ col_w−8
         width = min(24, max(6, W // 2 - 25))
         mem_attr = self.attr(C_RED) if (avail is not None and avail < 10) else 0
         if avail is None or total is None:

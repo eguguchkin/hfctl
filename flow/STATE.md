@@ -1,13 +1,16 @@
 # STATE — hfctl watch-tui (dev-flow)
 
 - Сабстэдж: `watch/watch-tui`
-- Статус: **in-test (review round 2, fix 1/3)** — retest фикса по ревью round 1;
-  остаток: hostname в комментарии EXP-001 (артефакт тестера — закрывает сам)
-- Тестер: обязателен; verdict round 1 = BLOCKED-EXTERNAL (внутреннее всё зелёное)
-- Следующий шаг: GO пользователя → прогон EXP-001..003 на реальной машине →
-  тестер закрывает verdict → reviewer
-- Открытые внешние эксперименты: EXP-001 (TUI по SSH), EXP-002 (plain-пайп),
-  EXP-003 (plain в файл не портит TTY) — `flow/external/`, ждём GO.
-- Пометка: для EXP нужен НОВЫЙ hfctl на машине (текущий — без watch_tui.py);
-  доставка — через нормальный путь (commit → clone+install.sh) либо bundle,
-  решение за пользователем (какая машина, допустим ли краткий recreate).
+- Статус: **ЗАКРЫТ (2026-11-13)** — reviewer APPROVED round 3 (scope-limited по
+  блокирующему #4); tester PASS round 3 (первый чистый); EXP-001..003 PASS на
+  машине B (действительность retest подтверждена поимённо)
+- Следующий шаг: закрытие оркестратором — коммиты (продукт + blackboard),
+  статусный коммит `spec/state.md` (строка этапа 6 под новое поведение watch,
+  DoD 11), обновление доков hflab, пуш GitHub (пользователь, с хоста)
+- Внешние эксперименты: EXP-001 (TUI по SSH), EXP-002 (plain-пайп),
+  EXP-003 (plain не портит TTY) — **PASS (2026-11-13)**; реальные результаты —
+  в hflab (D10, правило 7), в репо — заглушки.
+- Бэклог (некритичные, не блокирующие): ширина sparkline (W//2−4 → max(4,
+  W//2−18)), дубль-строка seed/live, целочисленное форматирование GPU
+  temp/power, pre-existing usage rc=0 vs doc rc=1, «KV pages: -» вне
+  slot-режима — в dev-report.md (backlog) и review.md (non-critical).
