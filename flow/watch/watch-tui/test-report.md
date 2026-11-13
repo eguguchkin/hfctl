@@ -306,3 +306,82 @@ BLOCKED-EXTERNAL (как round 2): оркестратор накапливает
 доставка commit → clone + install.sh (решение за пользователем, см. STATE.md).
 После GO — перепуск EXP-001..003, вердикт обновляется на PASS/FAIL по
 `.result.txt`; при внутренне-зелёном и внешнем PASS → reviewer.
+
+## Round 1 (2026-11-13, fix-цикл 2): retest после fix-цикл 2 round 1 developer (stderr-фикс лог-потока)
+
+- Verdict: **BLOCKED-EXTERNAL** — все внутренние проверки зелёные, в т.ч.
+  замыкание дефекта (ERRNULL→STDOUT в обоих podman-вызовах, воспроизведение
+  до-фикс копия 28/30 rc 1, fake-podman-в-STDERR-pty-сценарий: строка в
+  лог-зоне); EXP-001…003 без изменений, ждём GO + перепуск оркестратором
+  (ssh/podman наружу запрещены гигиеной).
+- Среда: та же, что retest round 3 (dev-контейнер без podman/GPU, мёртвый
+  порт 19999, k10temp жив — Tctl читался реальным); эмулятор `/tmp/tuiretest/`
+  (Grid/run_pty переиспользованы без изменений), новые артефакты:
+  `/tmp/tuiretest/r1f2_check.py` (pty-прогон), `/tmp/tuiretest/r1f2podman/podman`
+  (fake-podman-шим, **все логи в STDERR** — точное воспроизведение FACTS.md),
+  `/tmp/tuiretest/r1f2_plain_down.sh` (plain-периодичность),
+  `/tmp/tuiretest/r1f2/prefix_watch_tui.py` (до-фикс копия для воспроизведения).
+  Показательное: при первом прогоне сценарий G упал на правах 644 у СВОЕГО
+  шима (не +x) — артефакт тест-харнеса, не продукт; после `chmod 755` — 33/33.
+
+### Замыкание дефекта (корень FAIL EXP-001 round 3: `stderr=DEVNULL`)
+
+| # | критерий | проверка | статус |
+|---|---|---|---|
+| 1 | оба podman-вызова — `stderr=STDOUT` | код: `seed()` (watch_tui.py:331) и `_spawn_once()` (watch_tui.py:346) — `stdout=subprocess.PIPE, stderr=subprocess.STDOUT`; grep `subprocess.DEVNULL` по файлу — **0 совпадений** (DEVNULL остался только в docstring как историческая пометка) | **закрыто** |
+| 2 | selfcheck: fake-podman в STDERR → строка в ring-buffer | `--selfcheck` → **30/30 ok, rc 0**; два новых кейса `seed: stderr→stdout` и `live: stderr→stdout`: shim `#!/bin/sh; echo fake-log-line >&2` (mkdtemp, chmod 755, в начало PATH) → `list(buf) == ['fake-log-line']` в обоих (seed и live) | **закрыто** |
+| 3 | воспроизведение: до-фикс копия падает ровно на этих кейсах | `sed 's/stderr=subprocess.STDOUT/stderr=subprocess.DEVNULL/'` (2 замены) → `--selfcheck`: **28/30, rc 1**, FAIL = ровно `seed: stderr→stdout` и `live: stderr→stdout` — идентично артефакту разработчика (dev-report fix-цикл 2 round 1) | **закрыто** |
+| 4 | pty-сценарий G (80×24 + fake-podman В STDERR): строка в лог-зоне, дефект EXP-001 снят | `fake-log-line` в финальном кадре, «(ждём логи…)» — 0 совпадений, «логи недоступны» — 0, Traceback=0 (кадр `/tmp/tuiretest/r1f2_G_grid.txt`); контраст со сценарием A (без podman) — «(ждём логи…)» на месте | **закрыто** |
+
+### Internal checks (полная регрессия)
+
+| DoD item | check | result |
+|---|---|---|
+| 1 (блоки TUI) | pty 80×24 xterm-256color, мёртвый порт, `+` t=2, `p` t=4, SIGTERM t=9: заголовки «движок»/«железо»/«скорость»/«память»/«логи» + «hfctl watch»; D8-подписи `decode: - tok/s (последний)`, `prefill: - tok/s (avg)`; Traceback=0 | **OK** |
+| 2 (клавиши, статус-бар) | `+` → «интервал 2 c», `p` → «пауза»; контракт round 2 сохранён: «flasинтервал»/«flaинтервал» — 0 совпадений, `qwen3.8:fla` + разрыв ≥1 кол перед «интервал» (row0 = `●hfctl watch │ модель qwen3.8:fla интервал 2 c      логи: пауза (p) │ q — выход`) | **OK** |
+| 3 (мин. терм, деградация, TERM) | pty 60×15: Traceback=0, блоки рисуются; pty 40×10: Traceback=0; TERM=dumb: ASCII-рамки `+---`, без `┌`; TERM=posix / TERM='': plain-фолбэк «сервер недоступен», без TUI-глифов — все Traceback=0 | **OK** |
+| 4 (server down: TUI жив) | мёртвый порт: «недоступен», `mem: ` живёт (RAM независимо), цикл 9 c без краха | **OK** (реальные датчики/логи — EXP-001) |
+| 5 (пороги цветом) | selfcheck 30/30; код-ревью порогов без изменений против round 3 | **OK** (визуально — EXP-001) |
+| 6 (plain раз в N; недоступен раз в 30) | `HFCTL_PORT=19999 ./hfctl watch --interval 1` (пайп, мёртвый порт, 66 c): «сервер недоступен» t=08:20:44/21:14/21:45 — Δ ровно 30/31 c (тик-квант, паттерн round 1–3), дублей нет (3 уникальные секунды); SIGTERM → «Выход Ctrl-C», rc 0; ESC-байты (0x1b): 0 | **OK** (интервалы на живом сервере — EXP-002) |
+| 7 (общий коллектор, bash только exec, мёртвый код) | без изменений против round 3 (diff-скоуп = только `watch_tui.py`): `grep -c 'while :' lib/commands.sh` → 0; `gpu_temp`/`watch_stats` — 0 ссылок; `cmd_watch` = разбор + `exec python3` | **OK** |
+| 8 (stdlib, один процесс, поток) | импорты без изменений против round 3 (только stdlib); `py_compile` ok | **OK** |
+| 9 (регрессия) | см. Regression ниже | **OK** |
+| 11 (доки) | `spec/hfctl.md`/`README.md` этой правкой НЕ тронуты (diff-скоуп = `watch_tui.py`); round-3 проверка описаний действительна; grep «live prefill/live decode/heartbeat/только при изменении/в простое молчит» по spec/README/hfctl/lib/watch_tui.py — **0 совпадений** | **OK** |
+| — (bash-разбор) | `watch --interval abc/0/0.5/--bogus` + лишний аргумент → FATAL-die, rc=1, прежние сообщения (5/5) | **OK** |
+| — (selfcheck) | `--selfcheck` → **30/30 ok**, rc 0 (2 новых кейса fix-цикл 2) | **OK** |
+| — (diff-скоуп) | продукт против HEAD: только `tpl/python/watch_tui.py` (10+/5-: docstring'и + 2 `STDERR→STDOUT` + 2 selfcheck-кейса); `tpl/bench/`, `spec/state.md`, `spec/hfctl.md`, `README.md`, `hfctl`, `lib/`, `install.sh` — 0 изменений | **OK** |
+
+### Failures (FAIL)
+
+НЕТ.
+
+### External experiments (round 1, fix-цикл 2)
+
+| EXP-id | DoD item | status |
+|---|---|---|
+| EXP-001-tui-ssh.sh | 1, 2, 5, 10 (TUI 80×24 по SSH: 5 блоков, статус-бар, сид-строки логов, Tctl-число, D8-метрики после запроса) | **created (round 2-cycle-2), ждёт GO** — без изменений (в дифе отсутствует; `bash -n` ok, +x); критерии round 3 (зона логов ≥1 строка, не «(ждём логи…)»/«логи недоступны»; prefill>0 + decode-число после done) — именно их закрывает stderr-фикс; перепуск на FAEX1 — оркестратором после GO (нужен НОВЫЙ бинарь с fix-цикл 2: текущий на машине — `9265176`, до фикса) |
+| EXP-002-plain-pipe.sh | 6, 10 (plain-стрим `\| tee f` ~12 c: Δ∈[1.5;2.5] c, полный срез) | **created (round 2-cycle-2), ждёт GO** — без изменений; `bash -n` ok, +x |
+| EXP-003-plain-tty-safe.sh | 10 (plain в ssh-TTY: 0 байт 0x1b, не alt-экран) | **created (round 2-cycle-2), ждёт GO** — без изменений; `bash -n` ok, +x |
+
+### Regression
+
+| suite | result |
+|---|---|
+| `bash -n hfctl install.sh lib/*.sh` | green |
+| `python3 -m py_compile tpl/python/*.py` | green |
+| `--selfcheck` | **30/30 ok**, rc 0 |
+| pty-прогон round 1 (A–G): 80×24 / 60×15 / 40×10 / TERM=dumb / TERM=posix / TERM='' / fake-podman-в-STDERR | **33/33 PASS**, Traceback=0 во всех |
+| `hfctl` без аргументов | usage, rc=0 (pre-existing, пометка round 1; не регрессия) |
+| `HFCTL_PORT=19999 hfctl status --json` | корректный отказ `{"profile": "27b-single", "autostart": false, "watchdog": false, "health": null}`, rc=0 |
+| `hfctl doctor` | rc 0, полная диагностика до «(сервер не отвечает)» без краша |
+| `cmd_status`/`cmd_logs`/`cmd_doctor` не тронуты | green: продукт-диф = только `tpl/python/watch_tui.py` (`lib/commands.sh` — 0 изменений) |
+| bench-фикстура, `spec/state.md` не тронуты | green: md5 `253c7ac50857fe6d0e10fb0d2c5e35c0` (канон); в дифе отсутствуют |
+| EXP-скрипты | green: 3/3 в дифе отсутствуют, `bash -n` ok, +x |
+
+### Next
+
+BLOCKED-EXTERNAL (как round 3): внутреннее — всё зелёное; оркестратор
+накапливает EXP-001…003. На FAEX1 нужен НОВЫЙ бинарь с fix-цикл 2 (текущий —
+`9265176`, до stderr-фикса): доставка — решение пользователя (STATE.md).
+После GO — перепуск EXP-001..003, вердикт обновляется на PASS/FAIL по
+`.result.txt`; при внешнем PASS → reviewer.

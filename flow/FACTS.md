@@ -75,6 +75,20 @@
 - PATH-фикс на FAEX1 сделан: `export PATH="$HOME/.local/bin:$PATH"`
   в `~/.bashrc` (подсказка install.sh, как рекомендовано продуктом).
 
+## podman logs и логи движка (проверено вживую на FAEX1, 2026-11-13)
+- **`podman logs` пишет логи в STDERR** (stdout=0 при pipe; и в -f-режиме тоже
+  — 14654 строк за 3 с на загруженной машине). Потребителю нужно
+  `stderr=STDOUT` (объединение), иначе пустой поток. Корень FAIL EXP-001
+  round 3: watch_tui.py использовал `stderr=DEVNULL`.
+- **Движок ПЕЧАТАЕТ per-request строки** в контейнер-лог:
+  `[req chatcmpl-2-4548] drafter=mtp tau=4.91 tok/s=55.6 decode (728 tok,
+  123 windows)` + `session cache: …` + `qwen4 QSA context mapped ahead …`.
+  T.е. «логи текут в работе» — реально; уточнение к описанию hflab
+  («движок не логирует lifecycle»): gateway не печатает прогресс по
+  запросу, но daemon печатает per-request-сводки — контейнер-лог жив.
+- На FAEX1 контейнер-лог активно пишется (чужой/наш трафик chatcmpl) —
+  лог-зона TUI будет живой в реальном использовании.
+
 ## Контекст
 - Движок имеет собственный `hipfire tui` (ratatui,
   `/workspace/hipfire/crates/hipfire-tui/`), но он в контейнере: не видит

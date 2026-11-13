@@ -426,3 +426,63 @@ pty-скрипты: `/tmp/tui_r2_check2.py` + эмулятор тестера
   (сначала проверить `podman logs --tail 0 -f` вживую).
 - **`--selfcheck`-кейс на живом podman** (seed с реальным контейнером):
   внешнее — в EXP-001 (PASS-критерий «стартовые строки видны сразу»).
+
+## Round 1 (2026-11-13, fix-цикл 2)
+
+- Дата: 2026-11-13 / fix-цикл 2, round 1/3
+- Файл: только `tpl/python/watch_tui.py` (10+/5-). Строго по нумерованному
+  списку оркестратора (stderr-дефект лог-потока, корень FAIL EXP-001 round 3),
+  без переделки остального. `spec/hfctl.md`/`README.md` — не тронуты: stderr-факт
+  там не упомянут (упоминание `podman logs` — в описании видимого поведения,
+  которое не меняется).
+
+### What was done (по пунктам списка)
+
+1. **Seed и live-потоки: `stderr=subprocess.STDOUT`.** Оба `podman logs`-вызова
+   (`seed()`: `subprocess.run`, `_spawn_once()`: `subprocess.Popen`) —
+   `stderr=subprocess.DEVNULL` заменено на `stderr=subprocess.STDOUT`
+   (объединение stderr в stdout-PIPE; факт: podman logs печатает ВСЕ логи в
+   stderr, и в -f-режиме тоже — FACTS.md «podman logs и логи движка»).
+   Таймаут seed 10 с и any-fail-молчание (нет podman/таймаут/rc≠0 → buf пуст,
+   зона «(ждём логи…)», без трейса) — сохранены, не тронуты.
+2. **Selfcheck: 2 новых кейса (28 → 30)** — `seed: stderr→stdout` и
+   `live: stderr→stdout`: fake-podman-шим (`#!/bin/sh; echo fake-log-line
+   >&2`, `tempfile.mkdtemp`, chmod 755, в начало `PATH` на время кейса)
+   печатает в STDERR — воспроизведение реального поведения podman; строка
+   обязана попасть в ring-buffer (`buf == ['fake-log-line']`). До фикса
+   оба кейса падают (buf пуст при DEVNULL — подтверждено: копия с
+   `DEVNULL` → 28/30, rc 1; ровно эти 2 кейса FAIL); после — зелёные.
+3. **Доки.** Docstring класса `LogStreamer`: «podman logs печатает логи в
+   STDERR (проверено вживую на FAEX1) — ОБА вызова объединяют stderr в
+   stdout-PIPE (stderr=STDOUT); с DEVNULL поток пуст и зона вечно
+   «(ждём логи…)»»; docstring `seed()`: «stderr объединён в stdout — podman
+   logs печатает в stderr». `spec/hfctl.md`/`README.md` — не тронуты (нет
+   упоминания stderr-факта, по пункту 3 списка).
+
+### Внутренние проверки (round 1, fix-цикл 2)
+
+| check | result |
+|---|---|
+| `python3 -m py_compile tpl/python/*.py` | ok |
+| `bash -n hfctl install.sh lib/*.sh` | ok |
+| `python3 tpl/python/watch_tui.py --selfcheck` | **30/30 ok, rc 0** (2 новых кейса) |
+| воспроизведение дефекта: копия файла с `stderr=subprocess.DEVNULL` → `--selfcheck` | **28/30, rc 1** — ровно 2 новых кейса FAIL (до фикса падает, после — зелёный) |
+| pty 80×24 xterm-256color (мёртвый порт, БЕЗ podman, interval 1, `+` t=2, `p` t=4): нет Traceback; 6 заголовков; row0 без зацепки, «интервал 2 c», «пауза»; «недоступен»; «mem: » жива; «(ждём логи…)» без podman; нет err-строки «логи недоступны» | **14/14 PASS** (`/tmp/tui_r1f2_check.py`, эмулятор `/tmp/tuiretest/tui_retest.py` переиспользован без изменений; кадр `/tmp/tui_r1f2_A_grid.txt`) |
+| pty 80×24 + fake-podman-шим (печать в STDERR) — воспроизведение EXP-001-дефекта: `fake-log-line` виден в capture (лог-зона: 3 строки — сид + live-ре-эмит при переспавне), нет «(ждём логи…)», нет Traceback | **3/3 PASS** (кадр `/tmp/tui_r1f2_G_grid.txt`) |
+| pty 60×15 / 40×10 (деградация) | Traceback=0, блоки рисуются (3/3) |
+| TERM=dumb | ASCII-рамки `+---`, без `┌`, Traceback=0 (3/3) |
+| TERM=posix / TERM='' (plain-фолбэки) | «сервер недоступен», Traceback=0 (4/4) |
+| «недоступен» при мёртвом порту | в capture (A), plain-фолбэки (E/F) |
+| pty-итог | **27/27 PASS, rc 0** |
+| plain-периодичность (plain логи не показывает — не тронут) | `/tmp/tuiretest/plain_r3_down.sh` (мёртвый порт, interval 1, 66 c): 3 строки «сервер недоступен» с Δ ровно 30 c ×2 (t=0/30/60), без дублей; SIGTERM → «Выход Ctrl-C», rc 0; ESC-байты: 0; строк лога в plain-выводе нет |
+| `hfctl` без аргументов | usage, rc=0 (pre-existing, как HEAD — не регрессия) |
+| `HFCTL_PORT=199999 hfctl status --json` | корректный отказ `{"profile": "27b-single", "autostart": false, "watchdog": false, "health": null}`, rc 0 |
+| скоуп дифа (продукт) | только `tpl/python/watch_tui.py`; `tpl/bench/` (md5 `253c7ac5…` канон), `spec/state.md`, `spec/hfctl.md`, `README.md`, `hfctl`, `lib/`, `install.sh` — не тронуты; коммитов нет (коммит — оркестратор) |
+
+### Not checked internally (round 1, fix-цикл 2)
+
+- **Живой контейнер на FAEX1** (EXP-001): реальные per-request-строки
+  движка в лог-зоне TUI (сид `--tail 50` при старте + live-поток),
+  дубль-строка сида/live визуально, `podman logs -f` живьём. Внутренне
+  воспроизведено через fake-podman-шим, печатающий в stderr (pty G +
+  selfcheck 2 кейса) — штатный путь, но не живой podman.

@@ -303,7 +303,10 @@ class LogStreamer(threading.Thread):
     `podman logs -t --tail 1 -f` (tail 1 = последняя строка сида
     повторится один раз при старте — штатно, одна дубль-строка).
     stdout построчно → deque(500), общий со сидом (append thread-safe,
-    lock не нужен). Поток НЕ дёргает curses и HTTP. podman/контейнер нет
+    lock не нужен). podman logs печатает логи в STDERR (проверено вживую на
+    FAEX1) — ОБА вызова объединяют stderr в stdout-PIPE (stderr=STDOUT);
+    с DEVNULL поток пуст и зона вечно «(ждём логи…)». Поток НЕ дёргает
+    curses и HTTP. podman/контейнер нет
     → сид и стрим молча падают (buf пуст, зона «(ждём логи…)»), повторные
     попытки раз в ~1 с — повторное появление контейнера видно само.
     stop() завершает подпроцесс (daemon-поток, fd не дёргает)."""
@@ -319,12 +322,13 @@ class LogStreamer(threading.Thread):
 
     def seed(self):
         # @returns None  # сид ring-buffer'а: `podman logs -t --tail 50`
-        #   (без -f; таймаут 10 с); нет podman/таймаут/rc≠0 — молча
-        #   (buf остаётся пустым), исключений не бросает
+        #   (без -f; таймаут 10 с; stderr объединён в stdout — podman logs
+        #   печатает в stderr); нет podman/таймаут/rc≠0 — молча (buf
+        #   остаётся пустым), исключений не бросает
         try:
             proc = subprocess.run(
                 ['podman', 'logs', '-t', '--tail', '50', self.container],
-                stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+                stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
                 text=True, errors='replace', timeout=10)
         except (FileNotFoundError, OSError, subprocess.TimeoutExpired):
             return
@@ -339,7 +343,7 @@ class LogStreamer(threading.Thread):
         try:
             proc = subprocess.Popen(
                 ['podman', 'logs', '-t', '--tail', '1', '-f', self.container],
-                stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+                stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
                 text=True, errors='replace')
         except (FileNotFoundError, OSError):
             return
@@ -561,6 +565,33 @@ def selfcheck():
     except Exception:
         seeded_ok = False
     ck('seed without podman no crash', seeded_ok)
+
+    # podman logs печатает в STDERR (проверено вживую на FAEX1) — ОБА
+    # вызова обязаны объединять stderr в stdout-PIPE; с DEVNULL buf пуст
+    # (лог-зона вечно «(ждём логи…)»). Фейковый podman пишет в stderr —
+    # прямое воспроизведение дефекта (до фикса оба кейса падают).
+    fake_bin = tempfile.mkdtemp(prefix='watch_tui_podman_')
+    try:
+        shim = fake_bin + '/podman'
+        with open(shim, 'w') as f:
+            f.write('#!/bin/sh\necho fake-log-line >&2\n')
+        os.chmod(shim, 0o755)
+        old_path = os.environ['PATH']
+        os.environ['PATH'] = fake_bin + os.pathsep + old_path
+        try:
+            ls_s = LogStreamer('no-such-container')
+            ls_s.seed()
+            ck('seed: stderr→stdout (podman logs → stderr)',
+               list(ls_s.buf) == ['fake-log-line'])
+            ls_l = LogStreamer('no-such-container')
+            ls_l._spawn_once()
+            ck('live: stderr→stdout (podman logs -f → stderr)',
+               list(ls_l.buf) == ['fake-log-line'])
+            ls_l.stop()
+        finally:
+            os.environ['PATH'] = old_path
+    finally:
+        shutil.rmtree(fake_bin)
 
     hist = [0.0, 2.5, 5.0, 10.0, 10.0, 2.5]
     ck('sparkline UTF-8', sparkline(hist, GLYPHS_UTF, 8) == '▁▂▄██▂')
