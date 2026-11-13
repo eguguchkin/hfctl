@@ -36,7 +36,7 @@
 #   выход, +/- и =/_ — интервал (клавишами clamp 1..10; стартовое из bash
 #   >10 уважается), p — пауза логов (вид заморожен, буферизация живёт).
 #   Скрытый --selfcheck — assert-самопроверка без сервера и TTY (exit 0/1);
-#   в non-TTY (TERM unset) может дать 29/30 — артефакт окружения, в TTY 30/30.
+#   в non-TTY (TERM unset) может дать 37/38 — артефакт окружения, в TTY 38/38.
 #
 # @returns integer  # 0 — обычный выход (q / Ctrl-C / SIGTERM); 1 — selfcheck упал
 import curses
@@ -303,7 +303,9 @@ class LogStreamer(threading.Thread):
     (seed(), синхронно в главном потоке ДO первого тика — D9: стартовые
     строки видны в первой же рамке), далее live-стример
     `podman logs -t --tail 1 -f` (tail 1 = последняя строка сида
-    повторится один раз при старте — штатно, одна дубль-строка).
+    повторится один раз при старте — дедуп: `_seed_tail` отбрасывает её
+    только в первой строке live-процесса; сид пуст / live-процесс
+    ре-спавнен — дедупа нет, буфер живёт как есть).
     stdout построчно → deque(500), общий со сидом (append thread-safe,
     lock не нужен). podman logs печатает логи в STDERR (проверено вживую
     на 128 GiB-машине gfx1151) — ОБА вызова объединяют stderr в
@@ -315,6 +317,7 @@ class LogStreamer(threading.Thread):
     stop() завершает подпроцесс (daemon-поток, fd не дёргает)."""
 
     # @type deque  buf      # последние 500 строк логов (сид + live)
+    # @type string|None _seed_tail # хвост сида: дедуп первой live-строки
     def __init__(self, container):
         super().__init__(daemon=True)
         self.container = container
@@ -322,6 +325,7 @@ class LogStreamer(threading.Thread):
         self._proc = None
         self._stopped = False
         self._last_try = 0.0
+        self._seed_tail = None
 
     def seed(self):
         # @returns None  # сид ring-buffer'а: `podman logs -t --tail 50`
@@ -336,7 +340,9 @@ class LogStreamer(threading.Thread):
         except (FileNotFoundError, OSError, subprocess.TimeoutExpired):
             return
         if proc.returncode == 0:
-            self.buf.extend(proc.stdout.splitlines())
+            lines = proc.stdout.splitlines()
+            self.buf.extend(lines)
+            self._seed_tail = lines[-1] if lines else None
 
     def _spawn_once(self):
         now = time.monotonic()
@@ -352,7 +358,15 @@ class LogStreamer(threading.Thread):
             return
         self._proc = proc
         for line in proc.stdout:
-            self.buf.append(line.rstrip('\n'))
+            line = line.rstrip('\n')
+            if self._seed_tail is not None and line == self._seed_tail:
+                self._seed_tail = None
+                # shortcut: дедуп — только первую строку live-процесса
+                # (штатный re-эмит --tail 1); при случайном совпадении теряется
+                # одна идентичная строка — допустимо (один раз при старте)
+                continue
+            self._seed_tail = None
+            self.buf.append(line)
         self._proc = None
 
     def stop(self):
@@ -507,19 +521,23 @@ PLAIN_MIN = ('12:00:00  queue: 0 │ served: 5 │ cache: - │ '
 
 def status_bar_layout(W, interval, model, paused):
     # @param 1: integer  # ширина терминала в знаках
-    # @returns (left, mid, right, x_mid, x_right)  # x_left фиксирован = 1
-    #   (за «●»); модель усечена так, чтобы между ней и mid был гарантированный
-    #   разрыв в 1 колонку (контракт: на 80 колонок ни наложений, ни касания);
-    #   при узком W mid сдвигается влево от права (деградация, put() всё равно
-    #   обрезает)
+    # @returns (left, mid, right, x_mid, x_right, draw_mid, draw_right)  #
+    #   bullet в колонке 0 (разрыв 1 кол), left — в колонке 2; модель
+    #   усечена так, чтобы разрыв left→mid был гарантированно ≥1 колонки
+    #   (контракт: на 80 колонок ни наложений, ни касания); при узком W
+    #   mid/right отбрасываются целиком (draw_* = False — put() не клипает
+    #   «наполовину», наложений нет)
     prefix = 'hfctl watch │ модель '
     mid = 'интервал %d c' % interval
-    right = 'логи: %s (p) │ q — выход' % ('пауза' if paused else 'live')
+    right = ('логи: live, пауза: p │ q — выход' if not paused
+             else 'логи: пауза, live: p │ q — выход')
     right_x = max(0, W - len(right) - 1)
     mid_x = max(0, min(W // 2 - len(mid) // 2, right_x - len(mid) - 1))
-    model_w = mid_x - len(prefix) - 2
-    model = model[:model_w] if model_w > 0 else ''
-    return prefix + model, mid, right, mid_x, right_x
+    model_w = mid_x - len(prefix) - 3
+    left = prefix + model[:max(0, model_w)]
+    draw_mid = mid_x > 2 + len(left)
+    draw_right = right_x > 2 + len(left)
+    return left, mid, right, mid_x, right_x, draw_mid, draw_right
 
 
 def selfcheck():
@@ -647,14 +665,100 @@ def selfcheck():
         shutil.rmtree(fake_hw)
         shutil.rmtree(fake_drm)
 
-    left, mid, right, mid_x, right_x = status_bar_layout(
+    left, mid, right, mid_x, right_x, draw_mid, draw_right = status_bar_layout(
         80, 2, 'qwen3.8:flash-next-mq4-xts', False)
-    # строгий '<': равенство 1+len(left)==mid_x — касание (хвост модели
-    # прижат к «интервал»), на 80 кол у prod-моделей это был live-дефект
+    # строгие '<': равенство mid_x - 2 - len(left)==1 — касание (хвост
+    # модели прижат к «интервал»), на 80 кол у prod-моделей это был
+    # live-дефект
     ck('status bar 80 cols gap≥1',
-       1 + len(left) < mid_x
-       and mid_x + len(mid) <= right_x
+       draw_mid and draw_right
+       and mid_x - 2 - len(left) >= 1
+       and mid_x + len(mid) < right_x
        and right_x + len(right) <= 80)
+    # Статус-бар ниже минимума: mid/right отбрасываются целиком (без
+    # наложений на left)
+    l60, m60, r60, mx60, rx60, dm60, dr60 = status_bar_layout(
+        60, 2, 'qwen3.8:flash-next-mq4-xts', False)
+    ck('status bar 60 cols',
+       dm60 is False and dr60 is True
+       and rx60 + len(r60) <= 60
+       and rx60 > 2 + len(l60))
+    l40, m40, r40, mx40, rx40, dm40, dr40 = status_bar_layout(
+        40, 2, 'qwen3.8:flash-next-mq4-xts', False)
+    ck('status bar 40 cols',
+       dr40 is False
+       and (rx40 + len(r40) > 40 or not dr40))
+    # Дедуп seed/live: live-процесс ре-эммитит хвост сида (--tail 1) —
+    # первая live-строка, равная хвосту сида, отбрасывается
+    fake2 = tempfile.mkdtemp(prefix='watch_tui_seed_')
+    try:
+        shim = fake2 + '/podman'
+        with open(shim, 'w') as f:
+            f.write('#!/bin/sh\n'
+                    'for a in "$@"; do [ "$a" = -f ] && { echo A; echo B; exit 0; }\n'
+                    'done\necho A\n')
+        os.chmod(shim, 0o755)
+        old_path = os.environ['PATH']
+        os.environ['PATH'] = fake2 + os.pathsep + old_path
+        try:
+            ls_a = LogStreamer('no-such-container')
+            ls_a.seed()
+            ls_b = LogStreamer('no-such-container')
+            ls_b.seed()
+            ls_b._spawn_once()
+            ls_b.stop()
+            ck('seed/live no dup',
+               list(ls_b.buf) == ['A', 'B'] and list(ls_a.buf) == ['A'])
+            # сид пуст (rc≠0) — дедупа нет, все live-строки добавляются
+            fake3 = tempfile.mkdtemp(prefix='watch_tui_seed_')
+            shim3 = fake3 + '/podman'
+            with open(shim3, 'w') as f:
+                f.write('#!/bin/sh\n'
+                        'for a in "$@"; do [ "$a" = -f ] && { echo C; exit 0; }\n'
+                        'done\nexit 1\n')
+            os.chmod(shim3, 0o755)
+            os.environ['PATH'] = fake3 + os.pathsep + old_path
+            ls_e = LogStreamer('no-such-container')
+            ls_e.seed()
+            ls_f = LogStreamer('no-such-container')
+            ls_f._spawn_once()
+            ls_f.stop()
+            ck('seed empty: live no dedup',
+               list(ls_e.buf) == [] and list(ls_f.buf) == ['C'])
+            shutil.rmtree(fake3)
+        finally:
+            os.environ['PATH'] = old_path
+    finally:
+        shutil.rmtree(fake2)
+    # sparkline: последние width значений (свежие не отброшены)
+    tail_vals = list(range(1, 31))
+    ck('sparkline tail kept',
+       len(sparkline(tail_vals, GLYPHS_UTF, 22)) == 22
+       and sparkline(tail_vals, GLYPHS_UTF, 22)[-1]
+       == GLYPHS_UTF[min(7, int(30 / 30 * 7.999))])
+    # Названия блоков/метрик (таблица контракта watch/polish)
+    fix = {'engine_ok': True,
+           'stats': {'queue_depth': 1, 'requests_served': 123,
+                     'retries_attempted': 1},
+           'metrics': {'hipfire_requests_failed_total': 2.0,
+                       'hipfire_spec_tau_sum': 10.0,
+                       'hipfire_spec_tau_count': 2.0,
+                       'hipfire_cached_prompt_tokens_total': 5.0},
+           'gpu': {'temp_c': 54.0, 'sclk_mhz': 600.0, 'power_w': 5.5,
+                   'busy_pct': 0.0, 'vram_used': None, 'gtt_used': None},
+           'cpu_temp_c': 39.1,
+           'mem': {'available_gib': 45.2, 'total_gib': 60.4,
+                   'swap_used_gib': 0.2, 'swap_total_gib': 8.0},
+           'kv_free': None, 'kv_total': None, 'uptime_s': 1.0}
+    ck('hardware labels',
+       [r[0] for r in Watch().rows_hardware(fix)]
+       == ['GPU freq', 'GPU load', 'GPU power', 'GPU temp', 'CPU temp'])
+    w = Watch()
+    ck('engine labels',
+       [r[0] for r in w.rows_engine(fix)]
+       == ['Model', 'Uptime', 'Queue', 'Errors', w.glyphs.tau + ' avg',
+           'Served', 'Retries', 'Cache'])
+    ck('KV pages dash', ('KV pages', '-') in w.rows_memory(fix, 80))
 
     for name in fails:
         print('selfcheck FAIL: %s' % name, file=sys.stderr)
@@ -868,44 +972,62 @@ class Watch:
         win.erase()
         g = self.glyphs
         put(win, 0, 0, g.dot, self.attr(C_GREEN if snap['engine_ok'] else C_RED))
-        left, mid, right, mid_x, right_x = status_bar_layout(
-            W, self.interval, self.model, self.paused)
-        put(win, 0, 1, left)
-        put(win, 0, mid_x, mid)
-        put(win, 0, right_x, right)
+        left, mid, right, mid_x, right_x, draw_mid, draw_right = \
+            status_bar_layout(W, self.interval, self.model, self.paused)
+        put(win, 0, 2, left)
+        if draw_mid:
+            put(win, 0, mid_x, mid)
+        if draw_right:
+            put(win, 0, right_x, right)
         if H < 4 or W < 8:
             return
-        # зона логов: min 6 (H≥24) / min 3 (H<24), (H−1)//4 снизу
-        log_h = max(6 if H >= 24 else 3, (H - 1) // 4)
-        log_top = H - log_h
-        avail = log_top - 1
-        if avail >= 8:
-            bh, gap = (avail - 1) // 2, 1
-        else:
-            bh, gap = max(3, avail // 2), 0
+        # Геометрия (контракт watch/polish §2): высота ряда = макс контента
+        # пары + 3 (заголовок + 2 рамки), ряды примыкают (gap=0), «Логи» =
+        # остаток вертикали (LOG_MIN=3); клип — только контент-хвосты.
+        if H < 10:
+            # сетка не влезает (1+3+3+3=10): статус-бар + «Логи» без контента
+            self.box(win, 0, H - 3, W, 3)
+            put(win, H - 2, 2, 'Логи')
+            return
+        c_e = 1 if not snap['engine_ok'] else len(self.rows_engine(snap))
+        h1 = max(c_e, len(self.rows_hardware(snap))) + 3
+        h2 = max(len(self.rows_speed(snap, d, W)),
+                 len(self.rows_memory(snap, W))) + 3
+        LOG_MIN = 3
+        rem = H - 1 - h1 - h2
+        if rem < LOG_MIN:
+            # не хватает строк суммарно: дефицит из контент-хвостов
+            # (ряд 1 — первым, деление целочисленное, детерминированно)
+            c1, c2 = h1 - 3, h2 - 3
+            d1 = min(c1, (LOG_MIN - rem) * c1 // (c1 + c2))
+            d2 = min(c2, LOG_MIN - rem - d1)
+            h1 -= d1
+            h2 -= d2
+        log_h = H - 1 - h1 - h2  # = rem (без клипа) или LOG_MIN (после)
+        log_top = 1 + h1 + h2
         col_w = max(10, W // 2)
         x2 = W - col_w
-        if avail >= 3:
-            engine_rows = [('недоступен', '')] if not snap['engine_ok'] \
-                else self.rows_engine(snap)
-            self.block(win, 0, 1, col_w, bh, 'движок', engine_rows)
-            self.block(win, x2, 1, col_w, bh, 'железо', self.rows_hardware(snap))
-            y2 = 1 + bh + gap
-            if y2 + bh - 1 <= log_top - 1:
-                self.block(win, 0, y2, col_w, bh, 'скорость', self.rows_speed(snap, d, W))
-                self.block(win, x2, y2, col_w, bh, 'память', self.rows_memory(snap, W))
+        self.block(win, 0, 1, col_w, h1, 'Движок',
+                   [('недоступен', '')] if not snap['engine_ok']
+                   else self.rows_engine(snap))
+        if W >= 2 * col_w:
+            self.block(win, x2, 1, col_w, h1, 'Железо', self.rows_hardware(snap))
+        self.block(win, 0, 1 + h1, col_w, h2, 'Скорость',
+                   self.rows_speed(snap, d, W))
+        if W >= 2 * col_w:
+            self.block(win, x2, 1 + h1, col_w, h2, 'Память',
+                       self.rows_memory(snap, W))
         self.box(win, 0, log_top, W, log_h)
-        put(win, log_top + 1, 2, 'логи')
-        # «(ждём логи…)» — только пока и сид пуст, и новых строк нет (D9);
-        # сид/стрим упали (нет podman/контейнера) — та же строка, без трейса
+        put(win, log_top + 1, 2, 'Логи')
+        # «(ждём логи…)» — только пока и сид пуст, и новых строк нет (D9),
+        # и есть строка для контента (log_h ≥ 4; при минимуме 3 — зона =
+        # рамка + «Логи» + рамка); сид/стрим упали (нет podman/контейнера)
+        # — та же строка, без трейса
         if self.log_view:
-            lines = self.log_view[-max(0, log_h - 3):]
+            lines = self.log_view[-(log_h - 3):]
             for i, ln in enumerate(lines):
-                yy = log_top + 2 + i
-                if yy >= H - 1:
-                    break
-                put(win, yy, 2, ln)
-        else:
+                put(win, log_top + 2 + i, 2, ln)
+        elif log_h >= 4:
             put(win, log_top + 2, 2, '(ждём логи…)')
 
     def box(self, win, x, y, w, h):
@@ -920,21 +1042,24 @@ class Watch:
 
     def block(self, win, x, y, w, h, title, rows):
         # Заголовок внутри вверху; строки (label, value[, attr]) — сверху
-        # вниз, не поместившиеся отбрасываются (деградация, не перенос).
+        # вниз, не поместившиеся отбрасываются ХВОСТОМ (деградация, не
+        # перенос). Выравнивание: label дополнен до макс-длины ярлыка
+        # блока + ': ' — значения блока стартуют с одной колонки.
         self.box(win, x, y, w, h)
         put(win, y + 1, x + 2, title, curses.A_BOLD)
+        lw = max((len(label) + 1 for label, *_ in rows), default=0)
         for i, row in enumerate(rows):
             yy = y + 2 + i
             if yy >= y + h - 1:
                 break
             label, value = row[0], row[1]
             attr = row[2] if len(row) > 2 else 0
-            put(win, yy, x + 2, label + ': ', attr)
             # value клипается по внутренней границе блока (колонка рамки
-            # x+w−1 не перезаписывается) — узкий терминал деградирует,
-            # а не портит рамку
-            put(win, yy, x + 2 + len(label) + 2,
-                value[:max(0, w - 5 - len(label))], attr)
+            # x+w−1 не перезаписывается, зазор ≥ 1) — узкий терминал
+            # деградирует, а не портит рамку
+            put(win, yy, x + 2,
+                (label + ':').ljust(lw) + ' ' + value[:max(0, w - lw - 4)],
+                attr)
 
     def rows_engine(self, snap):
         g = self.glyphs
@@ -943,18 +1068,18 @@ class Watch:
         # бьёт только необязательные (обслужено/ретраи/кэш).
         st = snap['stats'] or {}
         m = snap['metrics'] or {}
-        rows = [('модель', self.model),
-                ('uptime', fmt_uptime(snap['uptime_s'])),
-                ('очередь', fmti(st.get('queue_depth'), '-'))]
+        rows = [('Model', self.model),
+                ('Uptime', fmt_uptime(snap['uptime_s'])),
+                ('Queue', fmti(st.get('queue_depth'), '-'))]
         fails = m.get('hipfire_requests_failed_total')
         if fails is not None and fails > 0:
-            rows.append(('ошибки', str(int(fails)), self.attr(C_RED)))
+            rows.append(('Errors', str(int(fails)), self.attr(C_RED)))
         rows.append((g.tau + ' avg', fmt1(avg_of(m, 'hipfire_spec_tau'))))
-        rows.append(('обслужено', fmti(st.get('requests_served'), '-')))
+        rows.append(('Served', fmti(st.get('requests_served'), '-')))
         retr = st.get('retries_attempted')
         if retr is not None and retr != 0:
-            rows.append(('ретраи', str(int(retr)), self.attr(C_RED)))
-        rows.append(('кэш', fmti(m.get('hipfire_cached_prompt_tokens_total'), '-')))
+            rows.append(('Retries', str(int(retr)), self.attr(C_RED)))
+        rows.append(('Cache', fmti(m.get('hipfire_cached_prompt_tokens_total'), '-')))
         return rows
 
     def rows_hardware(self, snap):
@@ -968,11 +1093,11 @@ class Watch:
             busy_attr = self.attr(C_YELLOW) | curses.A_BOLD
         cpu = snap['cpu_temp_c']
         cpu_attr = self.attr(C_RED) if (cpu is not None and cpu > 80) else 0
-        return [('sclk', fmti(gp.get('sclk_mhz')) + ' MHz'),
-                ('busy', fmti(gp.get('busy_pct')) + '%', busy_attr),
-                ('power', fmti(gp.get('power_w')) + ' W'),
+        return [('GPU freq', fmti(gp.get('sclk_mhz')) + ' MHz'),
+                ('GPU load', fmti(gp.get('busy_pct')) + '%', busy_attr),
+                ('GPU power', fmti(gp.get('power_w')) + ' W'),
                 ('GPU temp', fmti(gp.get('temp_c')) + g.deg),
-                ('Tctl', fmt_c(cpu) + g.deg, cpu_attr)]
+                ('CPU temp', fmt_c(cpu) + g.deg, cpu_attr)]
 
     def rows_speed(self, snap, d, W):
         # Честные метрики (D8): decode = recent_tok_s (последний завершённый
@@ -980,7 +1105,9 @@ class Watch:
         # счётчиков за тик (активность, пики на завершении), НЕ скорость
         st = snap['stats'] or {}
         m = snap['metrics'] or {}
-        width = max(4, W // 2 - 4)
+        # окно ≈60 c (maxlen=60//interval); ширина вписана в рамку блока
+        # (колонка значения ≤ x+w−2, свежие точки не отбрасываются)
+        width = max(4, W // 2 - 18)
         return [('decode', fmt1(st.get('recent_tok_s')) + ' tok/s (последний)'),
                 ('prefill', fmt1(avg_of(m, 'hipfire_prefill_tokens_per_second'))
                           + ' tok/s (avg)'),
@@ -992,9 +1119,9 @@ class Watch:
         mem = snap['mem']
         avail, total = mem.get('available_gib'), mem.get('total_gib')
         # bar настолько узок, что полный value «<avail>/<total> GiB»
-        # (worst case 11 знаков «128.6/999.9») влезает в рамку блока
-        # col_w=40 на 80×24: 1+width+1+11+4 ≤ col_w−8
-        width = min(24, max(6, W // 2 - 25))
+        # (worst case «999.9/999.9» = 27 зн.) влезает в рамку блока:
+        # 1+width+1+11+4 ≤ col_w−2 (80×24: width 10, budget 27)
+        width = max(4, min(10, W // 2 - 30))
         mem_attr = self.attr(C_RED) if (avail is not None and avail < 10) else 0
         if avail is None or total is None:
             mem_val = '?'
@@ -1004,8 +1131,8 @@ class Watch:
                                            fmt1(avail), fmt1(total))
         kv = ('%d/%d' % (int(snap['kv_free']), int(snap['kv_total']))
               if snap['kv_free'] is not None and snap['kv_total'] is not None else '-')
-        return [('mem', mem_val, mem_attr),
-                ('swap', '%s/%s GiB' % (fmt1(mem.get('swap_used_gib')),
+        return [('RAM', mem_val, mem_attr),
+                ('Swap', '%s/%s GiB' % (fmt1(mem.get('swap_used_gib')),
                                         fmt1(mem.get('swap_total_gib')))),
                 ('KV pages', kv)]
 
