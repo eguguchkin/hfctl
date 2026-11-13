@@ -226,11 +226,15 @@ if not m or m.group(1) == '?':
 elif not re.search(r'\.\d', m.group(1)):
     fails.append('CPU temp не дробный (контракт: температура с одним знаком): '
                  + m.group(0))
-# D8 (без изменений): честные метрики после завершённого запроса
-mp = re.search(r'prefill: ([0-9.]+) tok/s \(avg\)', c3)
-mpx = re.search(r'prefill: (\S+) tok/s \(avg\)', c3)
-md = re.search(r'decode: ([0-9.]+) tok/s \(последний\)', c3)
-mdx = re.search(r'decode: (\S+) tok/s \(последний\)', c3)
+# D8 (без изменений по смыслу): честные метрики после завершённого запроса.
+# Фикс test-triage round 1 (watch/polish): DoD 6 — значения выровнены в
+# колонку ((label+':').ljust(lw)+' '), между «:» и числом НЕСКОЛЬКО пробелов →
+# «\s+» вместо литерального «: » (старый одиночный пробел давал ложный FAIL
+# «строки нет» при корректном capture).
+mp = re.search(r'prefill:\s+([0-9.]+) tok/s \(avg\)', c3)
+mpx = re.search(r'prefill:\s+(\S+) tok/s \(avg\)', c3)
+md = re.search(r'decode:\s+([0-9.]+) tok/s \(последний\)', c3)
+mdx = re.search(r'decode:\s+(\S+) tok/s \(последний\)', c3)
 if not mp or float(mp.group(1)) <= 0:
     fails.append('prefill avg не > 0 после запроса: ' + (mpx.group(0) if mpx else 'строки нет'))
 if not md:
