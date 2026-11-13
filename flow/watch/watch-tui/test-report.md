@@ -219,3 +219,90 @@ D TERM=dumb / E TERM=posix / F TERM=''; Traceback=0 во всех).
 Next (по протоколу): BLOCKED-EXTERNAL → оркестратор накапливает EXP-001…003;
 после пуша коммита fix round 2 и GO пользователя — перепуск EXP на живой
 машине, вердикт обновляется на PASS/FAIL по `.result.txt`.
+
+## Round 3 (2026-11-13): retest после fix round 3 developer (D8 честные метрики + D9 сид логов)
+
+- Verdict: **BLOCKED-EXTERNAL** — все внутренние проверки зелёные, в т.ч.
+  D8-семантика (подписи TUI + plain-срез, грейп «live»-обещаний = 0) и D9
+  (сид/живой поток верифицированы fake-podman симом, «без podman» — молча,
+  без трейса); EXP-001 переписан под реальность движка (D8/D9-критерии),
+  ждёт GO + перепуска на FAEX1 (ssh/podman наружу запрещены гигиеной).
+- Среда: та же, что retest round 2 (dev-контейнер без podman/GPU, мёртвый
+  порт 19999, k10temp жив — Tctl читался реальным); эмулятор `/tmp/tuiretest/`
+  (Grid/run_pty переиспользованы как есть), новые артефакты: fake podman-шим
+  `/tmp/tuiretest/r3podman/podman` (ветка по наличию `-f`: seed =
+  `STARTUP-A/STARTUP-B/SEED-LAST`, live = `SEED-LAST` + `LIVE-1/LIVE-2`
+  через 1 с) и fake-server `/tmp/tuiretest/r3_fake_server.py` (:19998,
+  prefill-гистограмма 900/12 → avg 75.0, `recent_tok_s` 61.5 — свои цифры,
+  не фикстуры разработчика).
+- pty-прогон round 3 (`/tmp/tuiretest/r3_check.py`, сценарии A–H): **45/45
+  PASS**. Кадр: `/tmp/tuiretest/r3_A_grid.txt` (+ r3_B_grid.txt, r3_C_grid.txt).
+
+### D8 — честные метрики (decode = recent_tok_s, prefill = avg гистограммы)
+
+| проверка | результат |
+|---|---|
+| grep «live prefill / live decode / live tok / live-скорость» по `spec/hfctl.md`, `README.md`, `hfctl`, `lib/*.sh`, `watch_tui.py` | **0 совпадений** (rc=1); так же «avg prefill»/«avg decode» — 0 |
+| grep старых формулировок («heartbeat», «только при изменении», «в простое молчит», «обменов нет») там же | **0 совпадений** |
+| TUI-подписи (pty A, 80×24, мёртвый порт): `decode: - tok/s (последний)`, `prefill: - tok/s (avg)` в блоке «скорость»; «spark prefill»/«spark decode» на месте; старые подписи `live prefill`/`live decode`/`avg prefill`/`avg decode` — 0 совпадений в capture | **OK** |
+| plain-срез на живом fake-server (interval 1, 5 с): `… prefill: 75.0 tok/s (avg) │ decode: 61.5 tok/s (последний) …` — decode из `recent_tok_s`, prefill = _sum/_count (900/12=75.0) | **OK** (каждая из 5 строк; `/tmp/tuiretest/r3_plain_live.out`) |
+| дельты счётчиков — только sparkline/активность, не tok/s | код: `Deltas.update` — Δprompt/Δcompletion **токенов за тик** (int), `prev_time`/Δ-Δt удалены; потребители — `push_spark` (deque → sparkline) и `served_delta` (в plain `served (+N)`); ни в `fmt_plain`, ни в `rows_speed` Δ не форматится как tok/s — просмотрено | **OK** |
+
+### D9 — сид лог-зоны (`--tail 50` + live `--tail 1 -f`)
+
+| проверка | результат |
+|---|---|
+| код: `seed()` = `podman logs -t --tail 50` (без -f, таймаут 10 с), вызывается синхронно в `run_tui()` ДО первой рамки; live = `podman logs -t --tail 1 -f`; err-ветка `draw()` удалена — «(ждём логи…)» только пока buf пуст | просмотрено (watch_tui.py:320-333, 341, 778, 863-873) | **OK** |
+| без podman (pty A): «(ждём логи…)» в зоне, «логи недоступны» — 0 совпадений, Traceback=0 (молча, без трейса) | **OK** |
+| fake podman, seed-режим (pty B): сид-строки `STARTUP-A`, `STARTUP-B`, `SEED-LAST` в финальной рамке; «(ждём логи…)» и «логи недоступны» — отсутствуют | **OK** (шим вызывается именно БЕЗ `-f` — сид-ветка) |
+| fake podman, live-режим (pty C): `SEED-LAST`, `LIVE-1`, `LIVE-2` в финальной рамке (live-поток течёт), «(ждём логи…)» — отсутствует | **OK** (шим вызывается с `-f` — live-ветка; точный argv сверён по коду) |
+
+### Plain-срез (DoD 6)
+
+| проверка | результат |
+|---|---|
+| live fake-server, interval 1, 5 с: 5 строк, Δ ровно 1 с; полный срез D2 в каждой: `queue: 2 │ served: 55 │ cache: 300 │ prefill: 75.0 tok/s (avg) │ decode: 61.5 tok/s (последний) │ mem: 16.5/31.3 GiB │ swap: 0.0/0.0 GiB │ gpu: ?C ?MHz ?W ?% │ cpu: 58.6–59.6C` (cpu — реальный k10temp; gpu — `?`, датчика в контейнере нет — штатно) | **OK**, ESC-байты (0x1b): 0 |
+| мёртвый порт, interval 1, 66 с: «сервер недоступен» t=01:35:41/36:11/36:41 — Δ ровно 30 с ×2, без дублей (уникальные секунды); SIGTERM → «Выход Ctrl-C», **rc=0** | **OK** (расхождение с таблицей task.md «×35 с → 1 строка» — разрешено в round 1 по тексту §6/brief DoD 6), ESC: 0 |
+
+### Полная регрессия
+
+| suite | result |
+|---|---|
+| `bash -n hfctl install.sh lib/*.sh` | green |
+| `python3 -m py_compile tpl/python/*.py` | green |
+| `--selfcheck` | **28/28 ok**, rc 0 (5 новых кейсов round 3: decode=recent_tok_s, decode no data → -, prefill avg 1200/14, prefill avg no samples → None, seed без podman не падает) |
+| pty 80×24 (A): 5 заголовков + статус-бар; «недоступен» (мёртвый порт); `mem: ` живёт; `+` → «интервал 2 c», `p` → «пауза»; разрыв ≥1 кол перед «интервал» (контракт round 2 сохранён); D8-подписи; D9 «без podman» — см. выше | **OK**, Traceback=0 |
+| pty 60×15 / 40×10 (D/E) | Traceback=0, блоки рисуются | **OK** |
+| TERM=dumb (F): ASCII-рамки `+---`, без `┌`; TERM=posix (G), TERM='' (H): plain-фолбэк «сервер недоступен», без TUI-глифов | все Traceback=0 | **OK** |
+| bash-разбор: `watch --interval abc/0/0.5/--bogus` + лишний аргумент | die, rc=1, прежние сообщения (5/5) | **OK** |
+| `hfctl` без аргументов | usage, rc=0 (pre-existing, пометка round 1; не регрессия) | **OK** |
+| `HFCTL_PORT=19999 hfctl status --json` | корректный отказ `{"profile": "27b-single", "autostart": false, "watchdog": false, "health": null}`, rc=0 | **OK** |
+| `hfctl doctor` | rc 0, полная диагностика до «(сервер не отвечает)» без краша | **OK** |
+| `cmd_status`/`cmd_logs`/`cmd_doctor` не тронуты | green: продукт-диф = только `tpl/python/watch_tui.py`, `spec/hfctl.md`, `README.md` (по 1 строке — строка `watch`); `hfctl`, `lib/`, `install.sh` — 0 изменений | **OK** |
+| bench-фикстура, `spec/state.md` не тронуты | green: md5 `253c7ac50857fe6d0e10fb0d2c5e35c0` (канон); в дифе отсутствуют | **OK** |
+| доки (DoD 11): `spec/hfctl.md:60` + `README.md:38` | честные метрики (decode=recent_tok_s «(последний)» / prefill=avg гистограммы «(avg)» / sparkline=Δсчётчиков за тик — активность, не скорость); сид `--tail 50` + live, условие «(ждём логи…)»; plain-срез с новыми суффиксами — сверено с поведением | **OK** |
+
+### Failures (FAIL)
+
+НЕТ.
+
+### External experiments (round 3)
+
+| EXP-id | DoD item | status |
+|---|---|---|
+| EXP-001-tui-ssh.sh | 1, 2, 5, 10 (TUI 80×24 по SSH: 5 блоков, статус-бар без наложений, сид-строки логов, Tctl-число, D8-метрики после запроса) | **created (round 3), ждёт GO** — скрипт переписан под реальность движка (правка разрешена задачей retest): (а) «live prefill > 0» заменено — capture 3 (после завершения фонового запроса; скрипт теперь ждёт его до 180 с и снимает отдельный capture) содержит `prefill: N tok/s (avg)` с N > 0 и `decode: N tok/s (последний)` — число; (б) «(ждём логи…)» — НЕ критерий FAIL: критерий — в зоне логов capture 1 ≥1 строка, не «(ждём логи…)» и не «логи недоступны» (парсер зоны: строка «  логи» → контент до нижней рамки); (в) остальное как было: 5 блоков, статус-бар (1 кол. разрыва перед «интервал», нет «…flasинтервал»), Tctl-число. `bash -n` ok, +x; логика анализа проверена на синтетических captures: PASS-кейс (все критерии) + 2 FAIL-кейса (пустая зона + decode '-'; наложение «flasинтервал») — детект корректный |
+| EXP-002-plain-pipe.sh | 6, 10 (plain-стрим `\| tee f` ~12 c: Δ∈[1.5;2.5] c, полный срез) | **created (round 3), ждёт GO** — без изменений; критерии остаются валидными для нового формата: проверка по именам полей (`queue:/served:/cache:/prefill:/decode:/mem:/swap:/gpu:/cpu:`) — суффиксы значений `(avg)`/`(последний)` на неё не влияют |
+| EXP-003-plain-tty-safe.sh | 10 (plain в ssh-TTY: 0 байт 0x1b, не alt-экран) | **created (round 3), ждёт GO** — без изменений; критерий (счётчик 0x1b + `echo ok`) не зависит от формата строки |
+
+Замечание к EXP-001: дубль последней строки сида при старте live-потока
+(`--tail 1 -f` ре-эмитит) — штатно, задокументировано (dev-report round 3,
+«Ограничения» 1); на критерии не влияет (зона содержит ≥1 реальную строку),
+визуальный вид — в capture'ах `.result.txt`.
+
+### Next
+
+BLOCKED-EXTERNAL (как round 2): оркестратор накапливает EXP-001…003; на
+реальной машине (FAEX1) нужен НОВЫЙ бинарь с round 3 (текущий — до D8/D9):
+доставка commit → clone + install.sh (решение за пользователем, см. STATE.md).
+После GO — перепуск EXP-001..003, вердикт обновляется на PASS/FAIL по
+`.result.txt`; при внутренне-зелёном и внешнем PASS → reviewer.

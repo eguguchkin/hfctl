@@ -316,3 +316,113 @@ pty-скрипты: `/tmp/tui_r2_check2.py` + эмулятор тестера
   `$HFCTL_BIN` + `export PATH` в tmux-окне).
 - EXP-002/003: plain-путь этой правкой не затронут, но перепуск — после GO
   (оркестратор + tester).
+
+## Round 3 (2026-11-13): fix по внешней приёмке EXP-001 (D8 честные метрики + D9 сид логов)
+
+- Дата: 2026-11-13 / fix round 3 (3/3, последний)
+- Файлы: `tpl/python/watch_tui.py` (112+/64-), `spec/hfctl.md` (строка `watch`,
+  2 правки), `README.md` (строка `watch`, 2 правки). Диспетчер `hfctl` и
+  `lib/commands.sh` — не тронуты (их usage/docstring не обещали «live
+  prefill/decode» — только «живой дашборд», что правда). Строго по нумерованному
+  списку оркестратора (D8/D9), без переделки остального.
+
+### What was done (по пунктам списка)
+
+1. **decode tok/s = `recent_tok_s` из /stats (D8).** `rows_speed` (TUI):
+   ряд `('decode', fmt1(st.get('recent_tok_s')) + ' tok/s (последний)')`;
+   нет данных / `null` → `'-'` (fmt1). Plain-строка:
+   `decode: <n> tok/s (последний)` из того же поля (старое «live decode
+   = Δcompletion/Δt» удалено).
+2. **prefill tok/s = среднее гистограммы (D8).** `rows_speed` и plain:
+   `fmt1(avg_of(m, 'hipfire_prefill_tokens_per_second'))` (_sum/_count,
+   нет образцов/count=0 → `'-'`) с суффиксом `(avg)`. **avg decode —
+   удалён** (решено минимально: дубль — и «последний», и avg-decode по
+   гистограмме обещают одно и то же; «дубликаты не вводить»).
+3. **Дельты счётчиков — только активность (D8).** `Deltas.update`: больше
+   нет Δ/Δt (полей `prev_time`/`dt` — удалены) — Δprompt/Δcompletion
+   ТОКЕНОВ за тик (int; отрицательный Δ — сброс счётчиков → None на тике,
+   база обновляется). Потребитель единственный — sparkline
+   (`push_spark`, пики на завершении сохраняются). «завершено за тик: N»
+   НЕ введено (пункт «при желании»): sparkline уже показывает пик, а
+   «served (+N)» уже в plain-строке (не дублирую). В подписях — никаких
+   ток/с по дельтам.
+4. **Сид лог-зоны (D9).** `LogStreamer.seed()` — `podman logs -t --tail 50`
+   (без -f), синхронно в главном потоке в `run_tui()` ДО первой рамки
+   (стартовые строки видны сразу), таймаут 10 с; any-fail (нет podman /
+   таймаут / rc≠0) → молча, buf пуст. Live-стример: `--tail 200 -f` →
+   `--tail 1 -f` (без tail-1 последняя строка сида повторилась бы целиком
+   200-строчным дублем; tail 1 — одна дубль-строка при старте, см.
+   «Ограничения»). Ring-buffer общий (deque 500). err-ветка `draw()`
+   удалена: «(ждём логи…)» — только пока и сид пуст, и новых строк нет
+   (без podman/контейнера — та же строка, без трейса). --plain-режим
+   логов не поднимал и не поднимает (не тронут).
+5. **Доки.** `spec/hfctl.md` (строка `watch`): блок «скорость» — честные
+   метрики (decode = recent_tok_s последний запрос / prefill = avg
+   гистограммы / sparkline = Δсчётчиков за тик — активность, не скорость);
+   блок «логи» — сид `--tail 50` + live, условие «(ждём логи…)»;
+   plain-срез — `prefill tok/s (avg)`, `decode tok/s (последний)`.
+   `README.md` (строка `watch`) — то же, короче. Docstring'и:
+   заголовок файла, `Deltas`, `LogStreamer`, `seed`, `fmt_plain`,
+   `rows_speed`, тип-комменты.
+6. **Selfcheck: 5 новых кейсов (23 → 28).** `decode = recent_tok_s
+   (последний)`, `decode no data → -`, `prefill avg = _sum/_count 1200/14`,
+   `prefill avg no samples → None`, `seed without podman no crash`
+   (LogStreamer.seed() без podman — исключений не бросает). Fixtures
+   PLAIN_SNAP/PLAIN_FULL/PLAIN_MIN обновлены под новую семантику
+   (recent_tok_s 75.3, prefill-гистограмма 1200/14 → 85.7).
+
+### Внутренние проверки (round 3)
+
+| check | result |
+|---|---|
+| `python3 -m py_compile tpl/python/*.py` | ok |
+| `bash -n hfctl install.sh lib/*.sh` | ok |
+| `--selfcheck` | **28/28 ok, rc 0** |
+| pty 80×24 xterm-256color (мёртвый порт, interval 1, `+` t=2, `p` t=4, SIGTERM t=9): подписи `decode: - tok/s (последний)`, `prefill: - tok/s (avg)`, `spark prefill/decode` на месте, «live prefill/decode»/«avg prefill»/«avg decode» — 0 совпадений, row0 без зацепки «flasинтервал», «(ждём логи…)» без podman (err-строка «логи недоступны» — 0 совпадений), Traceback=0 | **30/30 PASS** (`/tmp/tui_r3_check.py`, эмулятор `/tmp/tuiretest/` переиспользован без изменений; кадр `/tmp/r3_A_grid.txt`) |
+| pty 60×15 / 40×10 (деградация) | Traceback=0, блоки рисуются |
+| TERM=dumb | ASCII-рамки `+---`, без `┌`, Traceback=0 |
+| TERM=posix / TERM='' | plain-фолбэк «сервер недоступен», без TUI-глифов, Traceback=0 |
+| plain-полный срез (fake-server на :19999, `/stats` + `/metrics`, interval 1, 5 с — `/tmp/fake_hipfire.py`): строка `… queue: 1 │ served: 7 │ cache: 42 │ prefill: 85.7 tok/s (avg) │ decode: 75.3 tok/s (последний) │ …` — decode=recent_tok_s, prefill=avg (1200/14=85.7), состав сверен с DoD 6/SPEC; Δ=1 c, 5 строк; ESC-байты (0x1b): 0 | **OK** |
+| plain-мёртвый порт (interval 1, 66 c): «сервер недоступен» t=01:09:05/09:35/10:05 — Δ ровно 30 с ×2, уникальные секунды 3 (без дублей); SIGTERM → «Выход Ctrl-C», rc 0 | **OK** |
+| bash-разбор: `watch --interval abc/0/0.5/--bogus` + лишний аргумент | die, rc=1, прежние сообщения (5/5) |
+| `hfctl` без аргументов | usage, rc=0 (pre-existing, как HEAD — не регрессия) |
+| `HFCTL_PORT=19999 hfctl status --json` | корректный отказ `{"profile": "27b-single", "autostart": false, "watchdog": false, "health": null}`, rc 0 |
+| скоуп дифа (продукт) | только `tpl/python/watch_tui.py`, `spec/hfctl.md`, `README.md`; `tpl/bench/` (md5 `253c7ac5…` канон), `spec/state.md`, `hfctl`, `lib/`, `install.sh` — не тронуты; коммитов нет (коммит — оркестратор); `flow/*` в diffe — правки оркестратора, не мои |
+
+### Not checked internally (round 3)
+
+- **Живые цифры на FAEX1** (EXP-001 перепуск): decode = recent_tok_s
+  обновляется на каждом завершённом запросе (цифра меняется, не «0.0 в
+  работе»), prefill-avg растёт после генерации, sparkline-пики на
+  завершении, сид логов — реальные стартовые строки движка в зоне при
+  старте TUI. Live-смена артефактов — только на живом сервере.
+- **Дубль-строка сида/live** (`--tail 1 -f`): на живом контейнере
+  последняя строка сида повторится один раз при старте потока (см.
+  «Ограничения»); визуально — EXP-001.
+
+### Known limitations / assumptions (round 3)
+
+1. **Одна дубль-строка при старте live-потока**: `--tail 1 -f` ре-эмитит
+   последнюю строку сида (и при каждом переспавне потока, т.е. при
+   рестарте контейнера). `--tail 0 -f` дубля не дало бы, но валидность
+   `--tail 0` у podman 5.7 не верифицирована внутренне (нет podman в
+   dev-окружении), а при отказе поток молчал бы вечно (err-ветка
+   удалена по спеке) — риск не оправдан; 1 строка дублем — штатно.
+2. **Сид блокирует старт TUI**: `seed()` синхронен в главном потоке
+   (до первой рамки — иначе «видны сразу» недетерминированно). При
+   зависшем podman — до 10 с (таймаут) без картинки; штатно ~100-500 мс.
+3. **ASCII-терминал (не-UTF-8 TUI)**: суффикс «(последний)» не кодируется
+   в локаль → put() пропускает значение ряда `decode:` целиком (штатная
+   ветка: кириллические лейблы «модель/очередь/…» в этом режиме уже
+   не рисуются — pre-existing, деградация, не краш; Traceback=0).
+
+### Out-of-scope proposals (round 3)
+
+- **DECISIONS/FACTS (hfctl flow)**: D8/D9 уже зафиксированы оркестратором;
+  факт «счётчики токенов — только в done» уже в FACTS.md. Правки flow-файлов
+  — за оркестратором, сюда не трогал.
+- **`--tail 0 -f`** как вариант без дубля: если на FAEX1 (EXP-001) дубль
+  строки будет заметно раздражать — одна строка в аргументах Popen
+  (сначала проверить `podman logs --tail 0 -f` вживую).
+- **`--selfcheck`-кейс на живом podman** (seed с реальным контейнером):
+  внешнее — в EXP-001 (PASS-критерий «стартовые строки видны сразу»).

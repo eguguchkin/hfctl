@@ -9,20 +9,28 @@
 #
 # Побочные эффекты: каждый тик — GET /stats + /metrics (по 3 с таймаут) и
 #   чтение /sys, /proc (каждый тик независимо от доступности сервера);
-#   TUI-режим — фоновый daemon-поток `podman logs -t --tail 200 -f`
-#   (deque 500 строк; поток НИКОГДА не дёргает curses и HTTP); TUI рисует
-#   в alt-экране, выход снимает экран (endwin). Файлов и стека не меняет.
+#   TUI-режим — сид `podman logs -t --tail 50` (однократно, синхронно в
+#   главном потоке ДО первой рамки, таймаут 10 с; D9: стартовые строки
+#   видны сразу) + фоновый daemon-поток `podman logs -t --tail 1 -f`
+#   (deque 500 строк, общий со сидом; поток НИКОГДА не дёргает curses и
+#   HTTP); TUI рисует в alt-экране, выход снимает экран (endwin). Файлов
+#   и стека не меняет.
 #
 # Ограничения/допущения: stdlib, синтаксис 3.8+; один процесс, HTTP/sysfs
 #   только в главном потоке. «Сервер недоступен» определяется ТОЛЬКО по
 #   /stats: TUI — блок «движок» = «недоступен», железо/память/логи живут;
 #   plain — строка «сервер недоступен» раз в 30 с (первая сразу), полный
-#   срез не печатается (стрим-режим завязан на /stats). Живые скорости —
-#   Δсчётчики / Δt реального времени между УСПЕШНЫМИ чтениями /metrics;
-#   отрицательный Δ (счётчики сброшены) → '-' на тике, база обновляется.
-#   Sparkline — deque на скорость, maxlen = 60//interval (≥1), при смене
-#   интервала maxlen пересчитывается, история НЕ пересоздаётся (deque
-#   усекает с левого края). Глифы/рамки — Unicode при UTF-8-окружении,
+#   срез не печатается (стрим-режим завязан на /stats). Скорости ЧЕСТНЫЕ
+#   (D8): движок обновляет счётчики токенов ТОЛЬКО в done-событии, live-
+#   Δ/Δt в процессе НЕ существует — decode tok/s = `recent_tok_s` из
+#   /stats (последний завершённый запрос; нет данных → '-'), prefill
+#   tok/s = среднее гистограммы `hipfire_prefill_tokens_per_second`
+#   (_sum/_count; нет образцов → '-'). Δсчётчики за тик — НЕ скорость,
+#   только активность для sparkline (пики на завершении); отрицательный
+#   Δ (счётчики сброшены) → тик пропускается, база обновляется.
+#   Sparkline — deque на дельты за тик, maxlen = 60//interval (≥1), при
+#   смене интервала maxlen пересчитывается, история НЕ пересоздаётся
+#   (deque усекает с левого края). Глифы/рамки — Unicode при UTF-8-окружении,
 #   ASCII-фолбэк при не-UTF-8 или TERM пустом/dumb; initscr-краш
 #   (TERM неизвестен) → фолбэк в plain-режим, не краш. Ключи TUI: q/Q —
 #   выход, +/- и =/_ — интервал (клавишами clamp 1..10; стартовое из bash
@@ -246,43 +254,39 @@ def read_mem():
 
 
 class Deltas:
-    """Живые скорости: Δсчётчики/Δt (реальное время между успешными
-    чтениями /metrics); отрицательный Δ (сброс счётчиков) → None, база
-    всё равно обновляется. reset() — после простоя сервера, чтобы после
-    поднятия не было ложных дельт (перенос поведения bash-версии)."""
+    """Дельты счётчиков /metrics ЗА ТИК (активность, НЕ скорость): движок
+    обновляет счётчики токенов только в done-событии, поэтому в работе
+    дельта 0, а на завершении — скачок; используется только для sparkline.
+    Отрицательный Δ (сброс счётчиков) → None на тике, база всё равно
+    обновляется. reset() — после простоя сервера, чтобы после поднятия не
+    было ложных дельт (перенос поведения bash-версии)."""
 
     # @type dict|None  prev_metrics   # метрики предыдущего успешного чтения
-    # @type float|None  prev_time      # time.monotonic того же чтения
     # @type float|None  prev_served    # requests_served предыдущего тика
     def __init__(self):
         self.prev_metrics = None
-        self.prev_time = None
         self.prev_served = None
 
     def reset(self):
         self.prev_metrics = None
-        self.prev_time = None
         self.prev_served = None
 
     def update(self, snap):
         # @param 1: dict  # snap
-        # @returns dict   # prefill/decode tok/s (None = '-'), served_delta ≥ 0
+        # @returns dict   # prefill/decode — Δprompt/Δcompletion ТОКЕНОВ за
+        #   тик (None — нет базы/сброс; НЕ tok/s), served_delta ≥ 0
         out = {'prefill': None, 'decode': None, 'served_delta': 0}
         m = snap['metrics']
         if m is not None:
-            now = time.monotonic()
-            if self.prev_metrics is not None and self.prev_time is not None:
-                dt = now - self.prev_time
-                if dt > 0:
-                    for key, counter in (('prefill', 'hipfire_prompt_tokens_total'),
-                                         ('decode', 'hipfire_completion_tokens_total')):
-                        cur = m.get(counter)
-                        prev = self.prev_metrics.get(counter)
-                        if cur is not None and prev is not None:
-                            d = (cur - prev) / dt
-                            out[key] = d if d >= 0 else None
+            if self.prev_metrics is not None:
+                for key, counter in (('prefill', 'hipfire_prompt_tokens_total'),
+                                     ('decode', 'hipfire_completion_tokens_total')):
+                    cur = m.get(counter)
+                    prev = self.prev_metrics.get(counter)
+                    if cur is not None and prev is not None:
+                        d = int(cur - prev)
+                        out[key] = d if d >= 0 else None
             self.prev_metrics = m
-            self.prev_time = now
         st = snap['stats']
         served = st.get('requests_served') if st else None
         if served is not None:
@@ -293,22 +297,39 @@ class Deltas:
 
 
 class LogStreamer(threading.Thread):
-    """Фоновый стример `podman logs -t --tail 200 -f <container>`:
-    stdout построчно → deque(500) (append thread-safe, lock не нужен).
-    Поток НЕ дёргает curses и HTTP. podman/контейнер нет → err-строка,
-    повторные попытки раз в ~1 с — повторное появление контейнера видно
-    само. stop() завершает подпроцесс (daemon-поток, fd не дёргает)."""
+    """Логи: при старте — сид `podman logs -t --tail 50 <container>`
+    (seed(), синхронно в главном потоке ДO первого тика — D9: стартовые
+    строки видны в первой же рамке), далее live-стример
+    `podman logs -t --tail 1 -f` (tail 1 = последняя строка сида
+    повторится один раз при старте — штатно, одна дубль-строка).
+    stdout построчно → deque(500), общий со сидом (append thread-safe,
+    lock не нужен). Поток НЕ дёргает curses и HTTP. podman/контейнер нет
+    → сид и стрим молча падают (buf пуст, зона «(ждём логи…)»), повторные
+    попытки раз в ~1 с — повторное появление контейнера видно само.
+    stop() завершает подпроцесс (daemon-поток, fd не дёргает)."""
 
-    # @type string err      # '' | 'логи недоступно: …'
-    # @type deque  buf      # последние 500 строк логов
+    # @type deque  buf      # последние 500 строк логов (сид + live)
     def __init__(self, container):
         super().__init__(daemon=True)
         self.container = container
         self.buf = deque(maxlen=500)
-        self.err = ''
         self._proc = None
         self._stopped = False
         self._last_try = 0.0
+
+    def seed(self):
+        # @returns None  # сид ring-buffer'а: `podman logs -t --tail 50`
+        #   (без -f; таймаут 10 с); нет podman/таймаут/rc≠0 — молча
+        #   (buf остаётся пустым), исключений не бросает
+        try:
+            proc = subprocess.run(
+                ['podman', 'logs', '-t', '--tail', '50', self.container],
+                stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+                text=True, errors='replace', timeout=10)
+        except (FileNotFoundError, OSError, subprocess.TimeoutExpired):
+            return
+        if proc.returncode == 0:
+            self.buf.extend(proc.stdout.splitlines())
 
     def _spawn_once(self):
         now = time.monotonic()
@@ -317,19 +338,15 @@ class LogStreamer(threading.Thread):
         self._last_try = now
         try:
             proc = subprocess.Popen(
-                ['podman', 'logs', '-t', '--tail', '200', '-f', self.container],
+                ['podman', 'logs', '-t', '--tail', '1', '-f', self.container],
                 stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
                 text=True, errors='replace')
         except (FileNotFoundError, OSError):
-            self.err = 'логи недоступны: podman не найден'
             return
-        self.err = ''
         self._proc = proc
         for line in proc.stdout:
             self.buf.append(line.rstrip('\n'))
         self._proc = None
-        rc = proc.returncode
-        self.err = '' if rc == 0 else 'логи недоступны: podman rc=%s' % rc
 
     def stop(self):
         self._stopped = True
@@ -414,8 +431,9 @@ def fmt_plain(snap, d, ts):
     # @param 1: dict     # snap
     # @param 2: dict     # deltas {prefill, decode, served_delta}
     # @param 3: string   # метка времени HH:MM:SS
-    # @returns string    # полный срез; порядок фиксирован (D2); без
-    #   metrics → prefill/decode/кэш '-'; без датчика → '?'
+    # @returns string    # полный срез; порядок фиксирован (D2); prefill =
+    #   среднее гистограммы (avg), decode = recent_tok_s (последний
+    #   завершённый) — честные метрики (D8); без данных → '-'; без датчика → '?'
     st = snap['stats'] or {}
     m = snap['metrics'] or {}
     parts = ['queue: %s' % fmti(st.get('queue_depth'), '-')]
@@ -430,8 +448,8 @@ def fmt_plain(snap, d, ts):
     retr = st.get('retries_attempted')
     if retr is not None and retr != 0:
         parts.append('retries: %d' % int(retr))
-    parts.append('prefill: %s tok/s' % fmt1(d['prefill']))
-    parts.append('decode: %s tok/s' % fmt1(d['decode']))
+    parts.append('prefill: %s tok/s (avg)' % fmt1(avg_of(m, 'hipfire_prefill_tokens_per_second')))
+    parts.append('decode: %s tok/s (последний)' % fmt1(st.get('recent_tok_s')))
     mem = snap['mem']
     parts.append('mem: %s/%s GiB' % (fmt1(mem.get('available_gib')),
                                      fmt1(mem.get('total_gib'))))
@@ -447,20 +465,23 @@ def fmt_plain(snap, d, ts):
 
 PLAIN_SNAP = {
     'engine_ok': True,
-    'stats': {'queue_depth': 0, 'requests_served': 123, 'retries_attempted': 1},
+    'stats': {'queue_depth': 0, 'requests_served': 123, 'retries_attempted': 1,
+              'recent_tok_s': 75.3},
     'metrics': {'hipfire_cached_prompt_tokens_total': 4421.0,
-                'hipfire_requests_failed_total': 2.0},
+                'hipfire_requests_failed_total': 2.0,
+                'hipfire_prefill_tokens_per_second_sum': 1200.0,
+                'hipfire_prefill_tokens_per_second_count': 14.0},
     'gpu': {'temp_c': 62.0, 'sclk_mhz': 1500.0, 'power_w': 18.0,
             'busy_pct': 87.0, 'vram_used': None, 'gtt_used': None},
     'cpu_temp_c': 54.0,
     'mem': {'available_gib': 45.2, 'total_gib': 60.4,
             'swap_used_gib': 0.2, 'swap_total_gib': 8.0},
 }
-PLAIN_D = {'prefill': 84.2, 'decode': 75.3, 'served_delta': 1}
+PLAIN_D = {'prefill': 0, 'decode': 0, 'served_delta': 1}
 PLAIN_FULL = ('12:00:00  queue: 0 │ served: 123 (+1) │ cache: 4421 │ '
-              'errors: 2 │ retries: 1 │ prefill: 84.2 tok/s │ '
-              'decode: 75.3 tok/s │ mem: 45.2/60.4 GiB │ swap: 0.2/8.0 GiB │ '
-              'gpu: 62C 1500MHz 18W 87% │ cpu: 54.0C')
+              'errors: 2 │ retries: 1 │ prefill: 85.7 tok/s (avg) │ '
+              'decode: 75.3 tok/s (последний) │ mem: 45.2/60.4 GiB │ '
+              'swap: 0.2/8.0 GiB │ gpu: 62C 1500MHz 18W 87% │ cpu: 54.0C')
 PLAIN_SNAP_MIN = {
     'engine_ok': True,
     'stats': {'queue_depth': 0, 'requests_served': 5, 'retries_attempted': None},
@@ -471,8 +492,9 @@ PLAIN_SNAP_MIN = {
             'swap_used_gib': 0.0, 'swap_total_gib': 8.0},
 }
 PLAIN_D_MIN = {'prefill': None, 'decode': None, 'served_delta': 0}
-PLAIN_MIN = ('12:00:00  queue: 0 │ served: 5 │ cache: - │ prefill: - tok/s │ '
-             'decode: - tok/s │ mem: 12.0/60.0 GiB │ swap: 0.0/8.0 GiB │ '
+PLAIN_MIN = ('12:00:00  queue: 0 │ served: 5 │ cache: - │ '
+             'prefill: - tok/s (avg) │ decode: - tok/s (последний) │ '
+             'mem: 12.0/60.0 GiB │ swap: 0.0/8.0 GiB │ '
              'gpu: ?C ?MHz ?W ?% │ cpu: ?C')
 
 
@@ -517,6 +539,28 @@ def selfcheck():
     ck('plain full slice', fmt_plain(PLAIN_SNAP, PLAIN_D, '12:00:00') == PLAIN_FULL)
     ck('plain -/? substitutions',
        fmt_plain(PLAIN_SNAP_MIN, PLAIN_D_MIN, '12:00:00') == PLAIN_MIN)
+    # Честные метрики (D8): decode = recent_tok_s (последний запрос),
+    # prefill = _sum/_count гистограммы
+    ck('decode = recent_tok_s (последний)',
+       'decode: 75.3 tok/s (последний)' in
+       fmt_plain(PLAIN_SNAP, PLAIN_D, '12:00:00'))
+    ck('decode no data → -',
+       'decode: - tok/s (последний)' in
+       fmt_plain(PLAIN_SNAP_MIN, PLAIN_D_MIN, '12:00:00'))
+    ck('prefill avg = _sum/_count 1200/14',
+       avg_of(m, 'hipfire_prefill_tokens_per_second') == 1200.0 / 14.0)
+    ck('prefill avg no samples → None',
+       avg_of({'hipfire_prefill_tokens_per_second_sum': 5.0,
+               'hipfire_prefill_tokens_per_second_count': 0.0},
+              'hipfire_prefill_tokens_per_second') is None)
+    # Сид логов (D9): без podman (pty-окружение) не падает, buf пуст
+    ls = LogStreamer('no-such-container')
+    try:
+        ls.seed()
+        seeded_ok = True
+    except Exception:
+        seeded_ok = False
+    ck('seed without podman no crash', seeded_ok)
 
     hist = [0.0, 2.5, 5.0, 10.0, 10.0, 2.5]
     ck('sparkline UTF-8', sparkline(hist, GLYPHS_UTF, 8) == '▁▂▄██▂')
@@ -615,7 +659,7 @@ class Watch:
     # @type bool    utf8 / colors    # Unicode-глифы; цвета (has_colors)
     # @type Deltas  state            # база дельт
     # @type LogStreamer streamer     # поток логов (TUI-режим)
-    # @type deque   spark_p / spark_d # история live prefill/decode
+    # @type deque   spark_p / spark_d # история дельт счётчиков за тик (активность)
     # @type list    log_view         # «вид» логов (пауза — заморожен)
     # @type bool    paused / stop    # пауза логов; флаг выхода
     # @type integer|None signum      # сигнал, заставивший выйти (plain: «Выход Ctrl-C»)
@@ -731,6 +775,7 @@ class Watch:
                 self.colors = True
             except curses.error:
                 pass
+        self.streamer.seed()  # D9: до первой рамки — стартовые строки видны сразу
         self.streamer.start()
         try:
             while not self.stop:
@@ -815,6 +860,8 @@ class Watch:
                 self.block(win, x2, y2, col_w, bh, 'память', self.rows_memory(snap, W))
         self.box(win, 0, log_top, W, log_h)
         put(win, log_top + 1, 2, 'логи')
+        # «(ждём логи…)» — только пока и сид пуст, и новых строк нет (D9);
+        # сид/стрим упали (нет podman/контейнера) — та же строка, без трейса
         if self.log_view:
             lines = self.log_view[-max(0, log_h - 3):]
             for i, ln in enumerate(lines):
@@ -822,8 +869,6 @@ class Watch:
                 if yy >= H - 1:
                     break
                 put(win, yy, 2, ln)
-        elif self.streamer.err:
-            put(win, log_top + 2, 2, self.streamer.err)
         else:
             put(win, log_top + 2, 2, '(ждём логи…)')
 
@@ -887,12 +932,15 @@ class Watch:
                 ('Tctl', fmt_c(cpu) + g.deg, cpu_attr)]
 
     def rows_speed(self, snap, d, W):
+        # Честные метрики (D8): decode = recent_tok_s (последний завершённый
+        # запрос), prefill = среднее гистограммы; sparkline — дельты
+        # счётчиков за тик (активность, пики на завершении), НЕ скорость
+        st = snap['stats'] or {}
         m = snap['metrics'] or {}
         width = max(4, W // 2 - 4)
-        return [('live prefill', fmt1(d['prefill']) + ' tok/s'),
-                ('live decode', fmt1(d['decode']) + ' tok/s'),
-                ('avg prefill', fmt1(avg_of(m, 'hipfire_prefill_tokens_per_second'))),
-                ('avg decode', fmt1(avg_of(m, 'hipfire_decode_tokens_per_second'))),
+        return [('decode', fmt1(st.get('recent_tok_s')) + ' tok/s (последний)'),
+                ('prefill', fmt1(avg_of(m, 'hipfire_prefill_tokens_per_second'))
+                          + ' tok/s (avg)'),
                 ('spark prefill', sparkline(self.spark_p, self.glyphs.spark, width)),
                 ('spark decode', sparkline(self.spark_d, self.glyphs.spark, width))]
 

@@ -2,9 +2,11 @@
 # EXP-001 — TUI hfctl watch на живой машине (DoD 1, 2, 5, 10)
 #
 # Цель: доказать на реальной установке: TUI рендерит 5 блоков + статус-бар
-#   на 80×24, зона логов живая (течёт `podman logs -f`), цифра Tctl
-#   присутствует, и при живой генерации (фоновый long-запрос к серверу)
-#   «live prefill» показывает число > 0.
+#   на 80×24, зона логов живая (сид `podman logs --tail 50` при старте —
+#   стартовые строки контейнера видны сразу + live `podman logs -f`),
+#   цифра Tctl присутствует, и после завершённого запроса блок «скорость»
+#   показывает честные метрики (D8): prefill avg > 0 и decode (последний) —
+#   число.
 #
 # Prerequisites (проверяются скриптом):
 #   - запуск НА целевой машине (ssh -t <host> 'bash -s' < этот скрипт,
@@ -17,15 +19,25 @@
 #   и сессия закрывается мгновенно (корень FAIL round 1). Поэтому команда
 #   окна — ПОЛНЫЙ путь $HFCTL_BIN + явный export PATH.
 #
+# ВАЖНО (фикс round 3, D8/D9): «live prefill > 0» — НЕ критерий: движок
+#   обновляет счётчики токенов только в done-событии (live-скорости в
+#   процессе не существует — FACTS). Критерий: в capture ПОСЛЕ завершения
+#   хотя бы одного запроса `prefill: N tok/s (avg)` с N > 0 (на FAEX1 avg
+#   уже ненулевой) и `decode: N tok/s (последний)` — число (не ?/-).
+#   «(ждём логи…)» — НЕ критерий FAIL: с сидом зона логов должна содержать
+#   ≥1 строку (стартовые строки контейнера), не «(ждём логи…)» и не
+#   «логи недоступны».
+#
 # Команда запуска:
 #   ssh -t <host> 'bash -s' < flow/external/EXP-001-tui-ssh.sh
 #
-# Что есть PASS: capture-pane (80×24) содержит все 5 заголовков блоков
-#   (движок/железо/скорость/память/логи) + «hfctl watch» (статус-бар);
-#   в зоне логов нет «логи недоступны» и «(ждём логи…)» (вид не пуст —
-#   живые логи текут); строка «Tctl» содержит число (не ?); после
-#   запуска фоновой генерации capture содержит «live prefill: N tok/s»
-#   с N > 0. Вывод + capture — в EXP-001-tui-ssh.result.txt.
+# Что есть PASS: capture 1 (80×24) содержит все 5 заголовков блоков
+#   (движок/железо/скорость/память/логи) + «hfctl watch» (статус-бар,
+#   без наложений: 1 кол. разрыва перед «интервал», нет «…flasинтервал»);
+#   в зоне логов ≥1 строка, не «(ждём логи…)» и не «логи недоступны»;
+#   строка «Tctl» содержит число (не ?); capture 3 (после завершения
+#   запроса) содержит prefill avg > 0 и decode число. Вывод + captures —
+#   в EXP-001-tui-ssh.result.txt.
 set -uo pipefail
 cd "$(dirname "$0")"
 RES="EXP-001-tui-ssh.result.txt"
@@ -63,44 +75,80 @@ CAP1="$(tmux ${TMOPT[@]} capture-pane -p -t wt:0.0)"
 printf '%s\n' "$CAP1" > "$RES.cap1.txt"; say "--- capture 1 (до генерации) ---"; tee -a "$RES" < "$RES.cap1.txt"
 
 # живой long-запрос в фоне (генерация)
-curl -fsS -m 90 "http://127.0.0.1:$PORT/v1/chat/completions" \
+curl -fsS -m 180 "http://127.0.0.1:$PORT/v1/chat/completions" \
     -H 'content-type: application/json' \
     -d '{"model":"'"$MODEL"'","max_tokens":600,"reasoning_effort":"none","messages":[{"role":"user","content":"Write a detailed 600-word essay on the history of streaming computation."}]}' >/dev/null 2>&1 &
+CURL_PID=$!
 sleep 3
 CAP2="$(tmux ${TMOPT[@]} capture-pane -p -t wt:0.0)"
 printf '%s\n' "$CAP2" > "$RES.cap2.txt"; say "--- capture 2 (во время генерации) ---"; tee -a "$RES" < "$RES.cap2.txt"
+
+# ждём завершение запроса (done → recent_tok_s и prefill-гистограмма
+# обновляются — счётчики движка живут только в done-событии)
+DEADLINE=$((SECONDS + 180))
+while kill -0 "$CURL_PID" 2>/dev/null && [ "$SECONDS" -lt "$DEADLINE" ]; do sleep 2; done
+CAP3="$(tmux ${TMOPT[@]} capture-pane -p -t wt:0.0)"
+printf '%s\n' "$CAP3" > "$RES.cap3.txt"; say "--- capture 3 (после завершения запроса) ---"; tee -a "$RES" < "$RES.cap3.txt"
 
 tmux ${TMOPT[@]} kill-server 2>/dev/null || true
 say "tmux-сессия закрыта"
 
 # анализ
-python3 - "$RES.cap1.txt" "$RES.cap2.txt" >>"$RES" 2>&1 <<'PYEOF' || true
-import sys
-c1, c2 = open(sys.argv[1]).read(), open(sys.argv[2]).read()
+python3 - "$RES.cap1.txt" "$RES.cap3.txt" >>"$RES" 2>&1 <<'PYEOF' || true
+import re, sys
+c1, c3 = open(sys.argv[1]).read(), open(sys.argv[2]).read()
 fails = []
 for k in ('движок', 'железо', 'скорость', 'память', 'логи', 'hfctl watch'):
     if k not in c1:
         fails.append('нет блока/статус-бара: ' + k)
-if 'интервал' not in c1:
+row0 = c1.splitlines()[0] if c1.splitlines() else ''
+if 'интервал' not in row0:
     fails.append('нет «интервал N c» в статус-баре')
-for k in ('логи недоступны', '(ждём логи…)'):
-    if k in c1:
-        fails.append('зона логов не живая: ' + k)
-import re
+if 'flasинтервал' in c1 or 'flaинтервал' in c1:
+    fails.append('наложение в статус-баре: «…flasинтервал»')
+elif 'интервал' in row0:
+    i = row0.index('интервал')
+    if i < 1 or row0[i-1] != ' ':
+        fails.append('нет разрыва 1 кол. перед «интервал»: %r' % row0)
+# зона логов: строка «  логи», далее контент до нижней рамки
+def logzone_lines(cap):
+    out, started = [], False
+    for ln in cap.splitlines():
+        s = ln.rstrip()
+        if started:
+            if s.lstrip().startswith(('└', '+--')):
+                break
+            body = s[2:] if s.startswith('  ') else s.lstrip()
+            out.append(body.strip())
+            continue
+        if s.lstrip().startswith('логи'):
+            started = True
+    return out
+zone = [l for l in logzone_lines(c1)
+        if l and l != '(ждём логи…)' and not l.startswith('логи недоступны')]
+if not zone:
+    fails.append('зона логов без стартовых строк: %r' % logzone_lines(c1))
 m = re.search(r'Tctl:\s*([?0-9.]+)', c1)
 if not m or m.group(1) == '?':
     fails.append('Tctl без числа: ' + (m.group(0) if m else 'строки нет'))
-m2 = re.search(r'live prefill:\s*([0-9.]+)\s*tok/s', c2)
-if not m2 or float(m2.group(1)) <= 0:
-    fails.append('live prefill при генерации не > 0: ' + (m2.group(0) if m2 else 'нет числа'))
+mp = re.search(r'prefill: ([0-9.]+) tok/s \(avg\)', c3)
+mpx = re.search(r'prefill: (\S+) tok/s \(avg\)', c3)
+md = re.search(r'decode: ([0-9.]+) tok/s \(последний\)', c3)
+mdx = re.search(r'decode: (\S+) tok/s \(последний\)', c3)
+if not mp or float(mp.group(1)) <= 0:
+    fails.append('prefill avg не > 0 после запроса: ' + (mpx.group(0) if mpx else 'строки нет'))
+if not md:
+    fails.append('decode (последний) не число: ' + (mdx.group(0) if mdx else 'строки нет'))
 if fails:
     print('АНАЛИЗ: FAIL — ' + '; '.join(fails))
 else:
-    print('АНАЛИЗ: все критерии выполнены (Tctl=' + m.group(1) + 'C, live prefill=' + m2.group(1) + ' tok/s)')
+    print('АНАЛИЗ: все критерии выполнены (Tctl=%sC, prefill avg=%s tok/s, '
+          'decode=%s tok/s, строк в зоне логов: %d)'
+          % (m.group(1), mp.group(1), md.group(1), len(zone)))
 PYEOF
 
 if grep -q '^АНАЛИЗ: все критерии' "$RES"; then
-  say "RESULT: PASS — TUI 80x24: 5 блоков + статус-бар, живые логи, Tctl=$ (см. АНАЛИЗ), live prefill > 0 при генерации"
+  say "RESULT: PASS — TUI 80x24: 5 блоков + статус-бар (без наложений), сид-строки логов, Tctl, честные метрики D8 (prefill avg > 0, decode последний — число)"
 else
   say "RESULT: FAIL — см. АНАЛИЗ в $RES"
 fi

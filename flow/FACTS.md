@@ -16,12 +16,18 @@
   `hipfire_request_latency_milliseconds`, `hipfire_time_per_output_token_milliseconds`,
   `hipfire_decode_tokens_per_second`, **`hipfire_prefill_tokens_per_second`**,
   `hipfire_spec_tau`.
-- **Живая скорость префилла** = Δ`hipfire_prompt_tokens_total` / Δt за тик
-  (префилл = всплеск, весь промпт «сгорает» за секунды; decode токены этот
-  счётчик не двигает). Гистограмма prefill даёт среднее по всему аптайму —
-  только для строки «avg».
-- **Живая скорость decode** = Δ`hipfire_completion_tokens_total` / Δt;
-  `/stats recent_tok_s` — только скорость последнего завершённого запроса.
+- **Счётчики токенов обновляются ТОЛЬКО в done-событии**
+  (`metrics.rs:215-240`, `record_done`): в середине запроса
+  `prompt/completion_tokens_total` заморожены. Δза-тик = 0 в работе и
+  скачок на завершении — НЕ «live-скорость».
+- **Live-скорости в процессе НЕ СУЩЕСТВУЕТ** ни в /stats, ни в /metrics
+  (проверено по исходникам 0.4.5, 2026-11-13; prefill-прогресс — только
+  клиенту в SSE). Доступные скаляры: `/stats recent_tok_s` (decode
+  последнего завершённого), `queue_depth` (живой), гистограммы
+  `hipfire_prefill_tokens_per_second`/`hipfire_decode_tokens_per_second`
+  (средние по аптайму), GPU busy (host).
+- `/stats recent_tok_s`: `complete.rs:2737` — `meta.recent_tok_s` из
+  done-поля `tok_s`; перезаписывается на каждом done.
 
 ## `/stats` (JSON)
 Читает существующий харнес: `tpl/python/watch_stats.py` (ключи:
