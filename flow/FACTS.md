@@ -32,9 +32,13 @@
 ## Host sysfs (Strix Halo / gfx1151)
 - AMD-карта: `/sys/class/drm/card*/device/vendor` = `0x1002`;
   датчики в `…/device/hwmon/hwmon*/`: `temp1_input` (мК), `freq1_input`
-  (sclk, кГц), `power1_input` (мВт), `gpu_busy_percent` (0..100),
+  (label «sclk», **Гц** — проверено на FAEX1: 600000000 = 600 МГц),
+  `power1_input` (**мкВт/µW** — проверено: 5453000 ≈ 5.5 W),
   `mem_info_vram_used` / `mem_info_gtt_used` (байты).
-- CPU (k10temp): Tctl — `temp1_input` hwmon-датчика k10temp.
+  `gpu_busy_percent` (0..100) — в `…/device/gpu_busy_percent`,
+  НЕ в hwmon-каталоге.
+- CPU (k10temp): Tctl — `temp1_input` (миллиградусы) датчика k10temp,
+  ищем по `/sys/class/hwmon/hwmon*/name == k10temp` (не в drm-пути).
 - hipfire сам читает `mem_info_vram_used`/`gtt_used` в своих bench-чекпоинтах
   на Halo (`/workspace/hipfire/docs/perf-checkpoints/2026-10-27-qwen-vl-*.json`),
   т.е. файлы существуют на целевых машинах.

@@ -261,3 +261,58 @@
 - **GPU temp — целые градусы** (`fmti`): Tctl теперь 1 знак (требование),
   GPU temp в обоих рендерах остался integer (54.375 → «54C»). Если нужен
   тот же 1 знак — отдельная правка (не в нумерованном списке, не делал).
+
+## Round 2 (2026-11-12): fix по FAIL test-report (ре-тест round 1)
+
+- Date: 2026-11-13 / fix round 2 (2/3)
+- Файл: только `tpl/python/watch_tui.py` (3 правки, 11+/4-). Строго по
+  Failures #1 test-report «Round 1» (triage: impl); пункты 1, 2, 3, 5
+  нумерованного списка fix round 1 — закрыты, не переделывал.
+
+### What was done (по нумерованному списку)
+
+1. **`status_bar_layout()`: гарантированный разрыв 1 колонка.**
+   - Было: `model_w = mid_x - len(prefix) - 1` → на 80 кол с моделью
+     `qwen3.8:flash-next-mq4-xts` `1+len(left) == mid_x` (касание:
+     «qwen3.8:flasинтервал»).
+   - Стало: `model_w = mid_x - len(prefix) - 2` → модель усечена до 11 зн.
+     (`qwen3.8:fla`), перед «интервал» ровно 1 колонка разрыва;
+     docstring-комментарий функции обновлён (контракт: «ни наложений, ни
+     касания»).
+   - Узкое W: поведение не изменилось — при W≤60 `mid_x=0`, `model_w<0` →
+     модель пуста, `put()` всё равно обрезает (старая формула при тех же W
+     тоже давала `model_w<0`; проверено по таблице W=80/60/40/30/20/12/8).
+2. **Selfcheck: ассерт ужесточён до строгого `<`.** Кейс
+   `status bar 80 cols no overlap` переименован в `status bar 80 cols gap≥1`:
+   `1+len(left) <= mid_x` → `1+len(left) < mid_x` (равенство-касание теперь
+   провал). Кейс — ровно 80 кол с моделью `qwen3.8:flash-next-mq4-xts`
+   (пункт 2 списка). Число кейсов не выросло: **23** (кейс ужесточён, не
+   добавлен — «23 + новый/ужесточённый»).
+
+### Внутренние проверки (round 2)
+
+| check | result |
+|---|---|
+| `python3 -m py_compile tpl/python/*.py` | ok |
+| `python3 tpl/python/watch_tui.py --selfcheck` | **23/23 ok, rc 0** (кейс строгий) |
+| pty 80×24 xterm-256color (мёртвый порт, interval 1, модель из capture, `+` на t=2 c, SIGTERM на 7 c), реконструкция финального кадра | row0 = `●hfctl watch │ модель qwen3.8:fla интервал 2 c       логи: live (p) │ q — выход` — «flasинтервал» **нет**, перед «интервал» разрыв в 1 кол, Traceback=0 |
+| pty 60×15 | Traceback=0, блоки «движок»/«железо» рисуются (узкое W не ухудшилось) |
+| pty 40×10 | Traceback=0 (узкое W не ухудшилось) |
+| `status_bar_layout` по W=80/60/40/30/20/12/8 (модель 26 зн.) | 80: left=32, mid_x=34, gap=1; W≤60: mid_x=0, model='' — идентично доправки |
+| `bash -n hfctl install.sh lib/*.sh` | ok |
+| `hfctl` без аргументов | usage, rc=0 (pre-existing, как HEAD — не регрессия) |
+| `HFCTL_PORT=19999 hfctl status --json` | корректный отказ `{"profile": "27b-single", "autostart": false, "watchdog": false, "health": null}`, rc 0 |
+| скоуп дифа | продукт = только `tpl/python/watch_tui.py`; `tpl/bench/`, `spec/state.md` не тронуты; коммитов нет (коммит — оркестратор) |
+
+pty-скрипты: `/tmp/tui_r2_check2.py` + эмулятор тестера
+`/tmp/tuiretest/tui_retest.py` (Grid/run_pty переиспользованы как есть —
+валидированы ре-тестом round 1); capture финального кадра —
+`/tmp/tui_r2_A_grid.txt`. Эфемерные, в репо не кладутся.
+
+### Not checked internally (round 2)
+
+- Живой визуальный вид на FAEX1 с реальными моделями (18/26 зн.) — EXP-001
+  (перепуск после GO; скрипт уже исправлен tester'ом: полный путь
+  `$HFCTL_BIN` + `export PATH` в tmux-окне).
+- EXP-002/003: plain-путь этой правкой не затронут, но перепуск — после GO
+  (оркестратор + tester).

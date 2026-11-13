@@ -479,15 +479,16 @@ PLAIN_MIN = ('12:00:00  queue: 0 │ served: 5 │ cache: - │ prefill: - tok/s
 def status_bar_layout(W, interval, model, paused):
     # @param 1: integer  # ширина терминала в знаках
     # @returns (left, mid, right, x_mid, x_right)  # x_left фиксирован = 1
-    #   (за «●»); модель усечена так, чтобы поля не наезжали друг на друга
-    #   (контракт: на 80 колонок наложения нет); при узком W mid сдвигается
-    #   влево от права (деградация, put() всё равно обрезает)
+    #   (за «●»); модель усечена так, чтобы между ней и mid был гарантированный
+    #   разрыв в 1 колонку (контракт: на 80 колонок ни наложений, ни касания);
+    #   при узком W mid сдвигается влево от права (деградация, put() всё равно
+    #   обрезает)
     prefix = 'hfctl watch │ модель '
     mid = 'интервал %d c' % interval
     right = 'логи: %s (p) │ q — выход' % ('пауза' if paused else 'live')
     right_x = max(0, W - len(right) - 1)
     mid_x = max(0, min(W // 2 - len(mid) // 2, right_x - len(mid) - 1))
-    model_w = mid_x - len(prefix) - 1
+    model_w = mid_x - len(prefix) - 2
     model = model[:model_w] if model_w > 0 else ''
     return prefix + model, mid, right, mid_x, right_x
 
@@ -568,8 +569,10 @@ def selfcheck():
 
     left, mid, right, mid_x, right_x = status_bar_layout(
         80, 2, 'qwen3.8:flash-next-mq4-xts', False)
-    ck('status bar 80 cols no overlap',
-       1 + len(left) <= mid_x
+    # строгий '<': равенство 1+len(left)==mid_x — касание (хвост модели
+    # прижат к «интервал»), на 80 кол у prod-моделей это был live-дефект
+    ck('status bar 80 cols gap≥1',
+       1 + len(left) < mid_x
        and mid_x + len(mid) <= right_x
        and right_x + len(right) <= 80)
 

@@ -12,6 +12,11 @@
 #   - tmux, python3, podman в PATH; контейнер hipfire_hipfire_1 running;
 #     /stats на :$PORT отвечает
 #
+# ВАЖНО (фикс round 2): tmux-окно исполняет команду в НЕинтерактивном
+#   shell БЕЗ .bashrc → ~/.local/bin в PATH нет → голое «hfctl» даёт rc=127
+#   и сессия закрывается мгновенно (корень FAIL round 1). Поэтому команда
+#   окна — ПОЛНЫЙ путь $HFCTL_BIN + явный export PATH.
+#
 # Команда запуска:
 #   ssh -t <host> 'bash -s' < flow/external/EXP-001-tui-ssh.sh
 #
@@ -47,7 +52,10 @@ curl -fsS -m 5 "http://127.0.0.1:$PORT/stats" >/dev/null 2>&1 || fail "/stats н
 
 TMOPT=(-L exp001)
 tmux ${TMOPT[@]} kill-server 2>/dev/null || true
-tmux ${TMOPT[@]} new-session -d -x 80 -y 24 -n watch -s wt "hfctl watch"
+# tmux-окно = не интерактивный shell (без .bashrc) → в PATH нет ~/.local/bin;
+# полный путь $HFCTL_BIN + явный export PATH (корень FAIL round 1 — rc=127).
+TMUX_CMD="export PATH=\"$HOME/.local/bin:$PATH\"; exec '$HFCTL_BIN' watch"
+tmux ${TMOPT[@]} new-session -d -x 80 -y 24 -n watch -s wt "$TMUX_CMD"
 say "tmux-сессия wt (80x24) поднята: hfctl watch"
 sleep 12
 

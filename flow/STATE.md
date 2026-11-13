@@ -1,7 +1,8 @@
 # STATE — hfctl watch-tui (dev-flow)
 
 - Сабстэдж: `watch/watch-tui`
-- Статус: **in-dev (round 2; fix-round 1/3)** — дефекты из внешней приёмки
+- Статус: **BLOCKED-EXTERNAL (fix-round 2/3)** — внутреннее зелёное (retest round 2);
+  ждёт пуш коммита → доставка на FAEX1 → перепуск EXP-001..003 → reviewer
 - Тестер: обязателен; verdict round 1 = BLOCKED-EXTERNAL (внутреннее всё зелёное)
 - Следующий шаг: GO пользователя → прогон EXP-001..003 на реальной машине →
   тестер закрывает verdict → reviewer
