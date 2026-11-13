@@ -38,7 +38,7 @@
 ## Host sysfs (Strix Halo / gfx1151)
 - AMD-карта: `/sys/class/drm/card*/device/vendor` = `0x1002`;
   датчики в `…/device/hwmon/hwmon*/`: `temp1_input` (мК), `freq1_input`
-  (label «sclk», **Гц** — проверено на FAEX1: 600000000 = 600 МГц),
+  (label «sclk», **Гц** — проверено на машине B (128 GiB, gfx1151): 600000000 = 600 МГц),
   `power1_input` (**мкВт/µW** — проверено: 5453000 ≈ 5.5 W),
   `mem_info_vram_used` / `mem_info_gtt_used` (байты).
   `gpu_busy_percent` (0..100) — в `…/device/gpu_busy_percent`,
@@ -61,7 +61,7 @@
 - Python-харнесы: 15 файлов в `tpl/python/` — python3 обязателен на целевой
   машине, stdlib-подход принят в репо.
 
-## Датчики на che-FAEX1 (проверено оркестратором вживую, 2026-11-12)
+## Датчики на машине B (128 GiB, gfx1151) (проверено оркестратором вживую, 2026-11-12)
 - `amdgpu` hwmon живёт в `/sys/class/drm/card0/device/hwmon/hwmon7`;
   `freq1_input` = **Гц** (600000000 = 600 МГц), `power1_input` = мВт,
   `gpu_busy_percent` = `/sys/class/drm/card0/device/gpu_busy_percent`
@@ -72,10 +72,10 @@
 - tmux-окно исполняет команду БЕЗ .bashrc (не интерактивный shell) →
   `~/.local/bin` в PATH нет (login-shell добавляет через .profile);
   `hfctl watch` в tmux без явного PATH/полного пути → rc=127.
-- PATH-фикс на FAEX1 сделан: `export PATH="$HOME/.local/bin:$PATH"`
+- PATH-фикс на машине B сделан: `export PATH="$HOME/.local/bin:$PATH"`
   в `~/.bashrc` (подсказка install.sh, как рекомендовано продуктом).
 
-## podman logs и логи движка (проверено вживую на FAEX1, 2026-11-13)
+## podman logs и логи движка (проверено вживую на машине B, 2026-11-13)
 - **`podman logs` пишет логи в STDERR** (stdout=0 при pipe; и в -f-режиме тоже
   — 14654 строк за 3 с на загруженной машине). Потребителю нужно
   `stderr=STDOUT` (объединение), иначе пустой поток. Корень FAIL EXP-001
@@ -86,7 +86,7 @@
   T.е. «логи текут в работе» — реально; уточнение к описанию hflab
   («движок не логирует lifecycle»): gateway не печатает прогресс по
   запросу, но daemon печатает per-request-сводки — контейнер-лог жив.
-- На FAEX1 контейнер-лог активно пишется (чужой/наш трафик chatcmpl) —
+- На машине B контейнер-лог активно пишется (чужой/наш трафик chatcmpl) —
   лог-зона TUI будет живой в реальном использовании.
 
 ## Контекст

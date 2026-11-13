@@ -35,7 +35,8 @@
 #   (TERM неизвестен) → фолбэк в plain-режим, не краш. Ключи TUI: q/Q —
 #   выход, +/- и =/_ — интервал (клавишами clamp 1..10; стартовое из bash
 #   >10 уважается), p — пауза логов (вид заморожен, буферизация живёт).
-#   Скрытый --selfcheck — assert-самопроверка без сервера и TTY (exit 0/1).
+#   Скрытый --selfcheck — assert-самопроверка без сервера и TTY (exit 0/1);
+#   в non-TTY (TERM unset) может дать 29/30 — артефакт окружения, в TTY 30/30.
 #
 # @returns integer  # 0 — обычный выход (q / Ctrl-C / SIGTERM); 1 — selfcheck упал
 import curses
@@ -169,7 +170,8 @@ def parse_metrics(text):
 
 
 GPU_SPEC = (
-    # (поле, файл в hwmon*, делитель) — масштабы сверены вживу (che-FAEX1):
+    # (поле, файл в hwmon*, делитель) — масштабы сверены вживу
+    #   (на 128 GiB-машине gfx1151):
     # freq1_input = Гц (600000000 = 600 MHz); power1_input = мкВт (µW,
     # 5453000 = 5.5 W); vram/gtt — байты. gpu_busy_percent НЕ в hwmon-каталоге,
     # а в card*/device/ — читается отдельно (read_gpu).
@@ -303,8 +305,9 @@ class LogStreamer(threading.Thread):
     `podman logs -t --tail 1 -f` (tail 1 = последняя строка сида
     повторится один раз при старте — штатно, одна дубль-строка).
     stdout построчно → deque(500), общий со сидом (append thread-safe,
-    lock не нужен). podman logs печатает логи в STDERR (проверено вживую на
-    FAEX1) — ОБА вызова объединяют stderr в stdout-PIPE (stderr=STDOUT);
+    lock не нужен). podman logs печатает логи в STDERR (проверено вживую
+    на 128 GiB-машине gfx1151) — ОБА вызова объединяют stderr в
+    stdout-PIPE (stderr=STDOUT);
     с DEVNULL поток пуст и зона вечно «(ждём логи…)». Поток НЕ дёргает
     curses и HTTP. podman/контейнер нет
     → сид и стрим молча падают (buf пуст, зона «(ждём логи…)»), повторные
@@ -566,8 +569,9 @@ def selfcheck():
         seeded_ok = False
     ck('seed without podman no crash', seeded_ok)
 
-    # podman logs печатает в STDERR (проверено вживую на FAEX1) — ОБА
-    # вызова обязаны объединять stderr в stdout-PIPE; с DEVNULL buf пуст
+    # podman logs печатает в STDERR (проверено вживую на 128 GiB-машине
+    # gfx1151) — ОБА вызова обязаны объединять stderr в stdout-PIPE;
+    # с DEVNULL buf пуст
     # (лог-зона вечно «(ждём логи…)»). Фейковый podman пишет в stderr —
     # прямое воспроизведение дефекта (до фикса оба кейса падают).
     fake_bin = tempfile.mkdtemp(prefix='watch_tui_podman_')
@@ -603,7 +607,8 @@ def selfcheck():
     ck('glyphs term dumb', choose_utf8('UTF-8', term='dumb') is False)
     ck('glyphs term empty', choose_utf8('UTF-8', term='') is False)
 
-    # Масштабы датчиков (сверено вживу на che-FAEX1) — фейковые деревья /sys
+    # Масштабы датчиков (сверено вживу на 128 GiB-машине gfx1151) —
+    # фейковые деревья /sys
     fake_hw = tempfile.mkdtemp(prefix='watch_tui_hw_')
     fake_drm = tempfile.mkdtemp(prefix='watch_tui_drm_')
     try:
@@ -925,23 +930,30 @@ class Watch:
             label, value = row[0], row[1]
             attr = row[2] if len(row) > 2 else 0
             put(win, yy, x + 2, label + ': ', attr)
-            put(win, yy, x + 2 + len(label) + 2, value, attr)
+            # value клипается по внутренней границе блока (колонка рамки
+            # x+w−1 не перезаписывается) — узкий терминал деградирует,
+            # а не портит рамку
+            put(win, yy, x + 2 + len(label) + 2,
+                value[:max(0, w - 5 - len(label))], attr)
 
     def rows_engine(self, snap):
         g = self.glyphs
+        # Обязательные по DoD 1 (модель/uptime/очередь/обслужено/τ) —
+        # первыми: на 80×24 у блока 5 строк, block() отбрасывает ХВОСТ —
+        # бьёт только необязательные (ошибки/ретраи/кэш).
         st = snap['stats'] or {}
         m = snap['metrics'] or {}
         rows = [('модель', self.model),
                 ('uptime', fmt_uptime(snap['uptime_s'])),
                 ('очередь', fmti(st.get('queue_depth'), '-')),
-                ('обслужено', fmti(st.get('requests_served'), '-'))]
+                ('обслужено', fmti(st.get('requests_served'), '-')),
+                (g.tau + ' avg', fmt1(avg_of(m, 'hipfire_spec_tau')))]
         fails = m.get('hipfire_requests_failed_total')
         if fails is not None and fails > 0:
             rows.append(('ошибки', str(int(fails)), self.attr(C_RED)))
         retr = st.get('retries_attempted')
         if retr is not None and retr != 0:
             rows.append(('ретраи', str(int(retr)), self.attr(C_RED)))
-        rows.append((g.tau + ' avg', fmt1(avg_of(m, 'hipfire_spec_tau'))))
         rows.append(('кэш', fmti(m.get('hipfire_cached_prompt_tokens_total'), '-')))
         return rows
 
@@ -979,7 +991,10 @@ class Watch:
         g = self.glyphs
         mem = snap['mem']
         avail, total = mem.get('available_gib'), mem.get('total_gib')
-        width = min(24, max(6, W // 2 - 12))
+        # bar настолько узок, что полный value «<avail>/<total> GiB»
+        # (worst case 9 знаков «128.6/999.9») влезает в рамку блока
+        # col_w=40 на 80×24: 1+width+1+9+4 ≤ col_w−8
+        width = min(24, max(6, W // 2 - 25))
         mem_attr = self.attr(C_RED) if (avail is not None and avail < 10) else 0
         if avail is None or total is None:
             mem_val = '?'
