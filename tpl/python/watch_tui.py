@@ -416,6 +416,30 @@ def fmti(x, q='?'):
     return q if x is None else str(int(x))
 
 
+def fmt_tok(v):
+    # @returns string  # счётчик токенов компактно: <1000 — целое, 1000…999999
+    #   → «99.1k», ≥1M → «1.2M»; None → '-' (watch/cache-tok-temp)
+    if v is None:
+        return '-'
+    if v >= 1_000_000:
+        return '%.1fM' % (v / 1e6)
+    if v >= 1000:
+        return '%.1fk' % (v / 1000.0)
+    return str(int(v))
+
+
+def temp_color(deg):
+    # @returns integer  # curses-pair подсветки температуры: None→0,
+    #   ≥90 → C_RED, 80…89.9 → C_YELLOW, иначе 0 (пороги от пользователя)
+    if deg is None:
+        return 0
+    if deg >= 90:
+        return C_RED
+    if deg >= 80:
+        return C_YELLOW
+    return 0
+
+
 def fmt_c(x):
     # @returns string  # °C, 1 знак (Tctl: 35875 мК → 35.9C); None → '?'
     return '?' if x is None else '%.1f' % x
@@ -462,7 +486,7 @@ def fmt_plain(snap, d, ts):
     if d['served_delta'] > 0:
         sv += ' (+%d)' % d['served_delta']
     parts.append('served: %s' % sv)
-    parts.append('cache: %s' % fmti(m.get('hipfire_cached_prompt_tokens_total'), '-'))
+    parts.append('cache tok: %s' % fmt_tok(m.get('hipfire_cached_prompt_tokens_total')))
     fails = m.get('hipfire_requests_failed_total')
     if fails is not None and fails > 0:
         parts.append('errors: %d' % int(fails))
@@ -499,7 +523,7 @@ PLAIN_SNAP = {
             'swap_used_gib': 0.2, 'swap_total_gib': 8.0},
 }
 PLAIN_D = {'prefill': 0, 'decode': 0, 'served_delta': 1}
-PLAIN_FULL = ('12:00:00  queue: 0 │ served: 123 (+1) │ cache: 4421 │ '
+PLAIN_FULL = ('12:00:00  queue: 0 │ served: 123 (+1) │ cache tok: 4.4k │ '
               'errors: 2 │ retries: 1 │ prefill: 85.7 tok/s (avg) │ '
               'decode: 75.3 tok/s (последний) │ mem: 45.2/60.4 GiB │ '
               'swap: 0.2/8.0 GiB │ gpu: 62C 1500MHz 18W 87% │ cpu: 54.0C')
@@ -513,7 +537,7 @@ PLAIN_SNAP_MIN = {
             'swap_used_gib': 0.0, 'swap_total_gib': 8.0},
 }
 PLAIN_D_MIN = {'prefill': None, 'decode': None, 'served_delta': 0}
-PLAIN_MIN = ('12:00:00  queue: 0 │ served: 5 │ cache: - │ '
+PLAIN_MIN = ('12:00:00  queue: 0 │ served: 5 │ cache tok: - │ '
              'prefill: - tok/s (avg) │ decode: - tok/s (последний) │ '
              'mem: 12.0/60.0 GiB │ swap: 0.0/8.0 GiB │ '
              'gpu: ?C ?MHz ?W ?% │ cpu: ?C')
@@ -578,6 +602,23 @@ def selfcheck():
        avg_of({'hipfire_prefill_tokens_per_second_sum': 5.0,
                'hipfire_prefill_tokens_per_second_count': 0.0},
               'hipfire_prefill_tokens_per_second') is None)
+    # Формат счётчика кэша и пороги температур (watch/cache-tok-temp)
+    ck('fmt_tok границы', fmt_tok(999) == '999' and fmt_tok(1000) == '1.0k'
+       and fmt_tok(99100) == '99.1k' and fmt_tok(1234567) == '1.2M')
+    ck('fmt_tok None → -', fmt_tok(None) == '-')
+    ck('temp_color границы', temp_color(79.9) == 0 and temp_color(80) == C_YELLOW
+       and temp_color(89.9) == C_YELLOW and temp_color(90) == C_RED)
+    ck('temp_color None → 0', temp_color(None) == 0)
+    ck('plain cache tok формат',
+       'cache tok: 99.1k' in
+       fmt_plain(dict(PLAIN_SNAP, metrics=dict(
+           PLAIN_SNAP['metrics'],
+           hipfire_cached_prompt_tokens_total=99100.0)), PLAIN_D, '12:00:00'))
+    ck('hardware temp подсветка',
+       [r[2] for r in Watch().rows_hardware(
+           dict(PLAIN_SNAP, gpu=dict(PLAIN_SNAP['gpu'], temp_c=91.0),
+                cpu_temp_c=83.0))[3:]]
+       == [Watch().attr(C_RED), Watch().attr(C_YELLOW)])
     # Сид логов (D9): без podman (pty-окружение) не падает, buf пуст
     ls = LogStreamer('no-such-container')
     try:
@@ -757,7 +798,7 @@ def selfcheck():
     ck('engine labels',
        [r[0] for r in w.rows_engine(fix)]
        == ['Model', 'Uptime', 'Queue', 'Errors', w.glyphs.tau + ' avg',
-           'Served', 'Retries', 'Cache'])
+           'Served', 'Retries', 'Cache tok'])
     ck('KV pages dash', ('KV pages', '-') in w.rows_memory(fix, 80))
 
     # Контент лог-зоны при log_h = 3 НЕ рисуется (review round 2, блокер #1):
@@ -1128,7 +1169,7 @@ class Watch:
         retr = st.get('retries_attempted')
         if retr is not None and retr != 0:
             rows.append(('Retries', str(int(retr)), self.attr(C_RED)))
-        rows.append(('Cache', fmti(m.get('hipfire_cached_prompt_tokens_total'), '-')))
+        rows.append(('Cache tok', fmt_tok(m.get('hipfire_cached_prompt_tokens_total'))))
         return rows
 
     def rows_hardware(self, snap):
@@ -1141,12 +1182,12 @@ class Watch:
             # подозрение на зависание: подсветка (жёлтый/bold)
             busy_attr = self.attr(C_YELLOW) | curses.A_BOLD
         cpu = snap['cpu_temp_c']
-        cpu_attr = self.attr(C_RED) if (cpu is not None and cpu > 80) else 0
         return [('GPU freq', fmti(gp.get('sclk_mhz')) + ' MHz'),
                 ('GPU load', fmti(gp.get('busy_pct')) + '%', busy_attr),
                 ('GPU power', fmti(gp.get('power_w')) + ' W'),
-                ('GPU temp', fmti(gp.get('temp_c')) + g.deg),
-                ('CPU temp', fmt_c(cpu) + g.deg, cpu_attr)]
+                ('GPU temp', fmti(gp.get('temp_c')) + g.deg,
+                 self.attr(temp_color(gp.get('temp_c')))),
+                ('CPU temp', fmt_c(cpu) + g.deg, self.attr(temp_color(cpu)))]
 
     def rows_speed(self, snap, d, W):
         # Честные метрики (D8): decode = recent_tok_s (последний завершённый
