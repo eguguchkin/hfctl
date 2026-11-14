@@ -233,3 +233,4 @@
   rc=0, KillMode-шума в журнале после ребута нет. Ребут-приёмка 0.4.6 на evo
   зелёная (сам-подъём healthy ~90 с). Обе машины на диспетчере ca564582
   (HEAD 1bb14f0). Артефакты EXP: hflab .local-analysis/bench-concurrency-exp/.
+- 2026-11-14: сабстэдж `bench/interrupt` ПРИНЯТ (ревью APPROVED r1; tester skipped — см. history): Ctrl-C/TERM теперь детерминированно прерывают bench (rc 130/143, без артефакта, orphan-curl убиваются, порядок jobs -p→pkill -P→дети). Ограничение среды: запуск `bench &` из скрипта наследует SIGINT ignored — живой EXP обязан быть foreground/pty. Ждёт пуша + доставки + живой проверки на evo.

@@ -40,6 +40,8 @@ hfctl bench — бенч производительности сервера (л
 ar-baseline (без спекуляции) печатается как пропущенный: сравнение рук —
 через 'hfctl use' разных профилей.
 Артефакт: $STACK_DIR/bench-runs/<timestamp>.json — база для --compare.
+Ctrl-C (SIGINT) или SIGTERM прерывают прогон на любой фазе: частичный прогон
+не сохраняется, начатые запросы доубиваются (rc 130/143).
 EOF
 }
 
@@ -497,6 +499,45 @@ bench_hol() {
   return 0
 }
 
+# Назначение: обработчик прерывания bench (INT/TERM-трап cmd_bench): заглушить
+#   трапы, убить дочерние процессы (foreground curl/python + фоновые subshell'ы
+#   параллельного блока И curl'ы внутри них — последние наследуют SIGINT
+#   «ignored» и сами не умирают), дождаться их, напечатать сообщение и выйти
+#   с rc 130/143; temp чистится существующим EXIT-trap'ом при exit.
+#
+# Побочные эффекты: SIGTERM всем прямым детям cmd_bench и детям его фоновых
+#   заданий (pkill -P); stdout — ничего, stderr — строка «прервано …»;
+#   завершает процесс (exit 130/143), чем запускает EXIT-trap (rm -rf BENCH_TMP).
+#   Артефакт не пишется (его запись — после всех сценариев, сюда мы не доходим).
+#
+# Ограничения/допущения: вызывается ТОЛЬКО как trap-команда cmd_bench после
+#   создания BENCH_TMP (иначе rc-выход без temp не страшен, а EXIT-trap
+#   справится с пустым каталогом). SIGTERM выбран для убийства детей, т.к.
+#   фоновые джобы игнорируют INT. Если сам cmd_bench стартовал с SIGINT
+#   «ignored» на входе (фоновый запуск из скрипта — грабля EXP-102), bash
+#   trap INT не поставит (POSIX) — прерываемость гарантирована при обычной
+#   диспозиции (терминал Ctrl-C, kill группы нормально запущенного процесса).
+#   Пока bash ждёт foreground-ребёнка, трап откладывается до его смерти — при
+#   Ctrl-C/kill ГРУППЫ curl получает сигнал тоже и умирает сразу.
+#
+# @param 1: 'INT' | 'TERM'  # имя сигнала для сообщения
+# @param 2: '130' | '143'   # rc (128+signum)
+# @returns integer          # не возвращается — завершает процесс через exit
+bench_abort() {
+  local sig="$1" rc="$2" p
+  trap - INT TERM
+  # Порядок важен: сначала ВНУТРЕННИЕ дети фоновых subshell'ов (curl'ы), пока
+  # их родители живы и PPid совпадает, — иначе после гибели subshell'а curl
+  # переописывается и -P его не находит.
+  for p in $(jobs -p 2>/dev/null); do
+    pkill -TERM -P "$p" 2>/dev/null || true        # curl/process-group-потомки внутри них
+  done
+  pkill -TERM -P $$ 2>/dev/null || true            # foreground-дети + фоновые subshell'ы
+  wait 2>/dev/null || true
+  printf 'bench: прервано (%s) — незавершённый прогон НЕ сохранён\n' "$sig" >&2
+  exit "$rc"
+}
+
 # Назначение: `hfctl bench` — локальный бенч производительности живого
 #   сервера: фикстуры + md5-гейт → health (с --fresh — recreate+wait_health)
 #   → прогрев → сценарии (quick: solo-code, solo-prose, ttft; full: ещё
@@ -507,7 +548,9 @@ bench_hol() {
 #
 # Побочные эффекты:
 #   Файлы: mktemp-каталог BENCH_TMP с trap 'rm -rf' на EXIT (runs.tsv,
-#     payload-*.json, *_resp, c_*.txt, artifact.json); артефакт
+#     payload-*.json, *_resp, c_*.txt, artifact.json); INT/TERM-трап
+#     (bench_abort) — прерывание с rc 130/143 без артефакта, см. bench_help;
+#     артефакт
 #     $OUT/<timestamp>.json (default $STACK_DIR/bench-runs, mkdir -p) —
 #     база будущих --compare; копирование фикстуры tpl/bench в c_code.txt
 #     (байты-в-байты, md5-гейт — warn при несовпадении, НЕ die) и трёх
@@ -588,6 +631,10 @@ cmd_bench() {
 
   BENCH_TMP="$(mktemp -d "${TMPDIR:-/tmp}/hfctl-bench.XXXXXX")"
   trap 'rm -rf "$BENCH_TMP"' EXIT
+  # Прерываемость (bench/interrupt): INT/TERM — явный трап (bench_parallel
+  # прерывался только «наполовину»: фоновые curl игнорируют SIGINT по POSIX).
+  trap 'bench_abort INT 130' INT
+  trap 'bench_abort TERM 143' TERM
   : > "$BENCH_TMP/runs.tsv"
   OUT="${out_dir:-$STACK_DIR/bench-runs}"
   RUNS="$runs"

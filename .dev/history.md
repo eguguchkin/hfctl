@@ -92,3 +92,10 @@
   defects/polish машинная часть закрыта на evo (verify rc=0, шума нет);
   ребут-приёмка 0.4.6 зелёная. Сабстэджи bench/concurrency и defects/polish
   полностью приняты.
+- 2026-11-14: bench/interrupt: brief оркестратора (находка EXP-102) →
+  developer (bench_abort + INT/TERM-трап, репро: до фикса параллельный блок
+  оставлял осиротевшие curl) → reviewer APPROVED r1. tester skipped:
+  обоснование — находка уже получена тестерским прогоном EXP-102, а фикс
+  покрыт офлайн-репро developer'а + самостоятельными прогонами reviewer'а
+  (INT→130/TERM→143/orphan=0); живая верификация — EXP за оркестратором
+  после пуша (требует foreground/pty, см. dev-report).
