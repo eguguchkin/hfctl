@@ -16,17 +16,20 @@ gfx11xx). Никакой привязки к конкретной инфраст
 - `install.sh` — bootstrap: бинарь в стек + симлинк в bin + PATH-подсказка.
   Единственная точка установки/обновления бинаря.
 - `README.md` — публичное лицо: quickstart, команды, профили.
-- `spec/` — зафиксированные решения: `hfctl.md` (UX-спецификация),
-  `plan.md` (этапы с DoD), `state.md` (трекер состояния — единственная
-  точка правды «что сделано / какой этап»; обновлять статусным коммитом).
+- `.dev/` — blackboard dev-flow (карта — `.dev/README.md`): `SPEC.md`
+  (UX-спецификация), `PLAN.md` (этапы с DoD), `STATE.md` (трекер состояния —
+  единственная точка правды «что сделано / какой этап»; обновлять статусным
+  коммитом), `DECISIONS.md`, `FACTS.md`, `history.md`, `tasks/<stage>/<stage>.<sub>/`
+  (документы сабстэджа), `external/` (EXP-очередь), `archive/`.
 - `tpl/bench/merge_sort_thinking_off.txt` — bench-фикстура (канон); md5
   зафиксирован (`BENCH_FIXTURE_MD5` в `lib/bench.sh`), не редактировать байты
   (любая правка меняет хеш и сравнимость замеров).
 
 ## Development protocol: dev-flow
 
-- **Blackboard**: `/workspace/hfctl/flow/` (layout: STATE.md, history.md,
-  SPEC.md, FACTS.md, DECISIONS.md, `<stage>/<sub-stage>/`, `external/`).
+- **Blackboard**: `/workspace/hfctl/.dev/` (layout: STATE.md, history.md,
+  SPEC.md, PLAN.md, FACTS.md, DECISIONS.md, `tasks/<stage>/<stage>.<sub>/`,
+  `external/`, `archive/`; карта — `.dev/README.md`).
 - **Internal checks** (роли запускают сами): `bash -n hfctl lib/*.sh`;
   `python3 -m py_compile tpl/python/*.py`; `hfctl` без аргументов → usage, rc=1;
   `hfctl status --json` с подменой PORT на чанковый (отказ должен быть
@@ -37,7 +40,7 @@ gfx11xx). Никакой привязки к конкретной инфраст
 - **Environment hygiene**: роли НЕ делают ssh/podman наружу, не трогают
   /workspace/hflab, не правят `tpl/bench/merge_sort_thinking_off.txt` (md5
   канон), не коммитят (коммиты — оркестратор после закрытия сабстэджа),
-  не правят `spec/state.md` (обновляет оркестратор статусным коммитом).
+  не правят `.dev/STATE.md` (обновляет оркестратор статусным коммитом).
 - **Code conventions**: диспетчер `hfctl` + `lib/*.sh` + `tpl/`; bash-комментарии
   с `# Назначение / Побочные эффекты / Ограничения / @param / @stdout / @returns`
   на русском (домашний стиль `lib/commands.sh`); python — только stdlib,
@@ -46,8 +49,8 @@ gfx11xx). Никакой привязки к конкретной инфраст
 
 ## Правила разработки
 
-1. Начинаешь работу — прочитай `spec/state.md`; любой коммит, меняющий
-   статус этапа/пункта, обновляет `spec/state.md` в себе же.
+1. Начинаешь работу — прочитай `.dev/STATE.md`; любой коммит, меняющий
+   статус этапа/пункта, обновляет `.dev/STATE.md` в себе же.
 2. Изменения целевого конфига сервера — только через код профилей hfctl
    (таблица в шапке), не руками в volume.
 3. После любой смены конфига: recreate → wait_health → smoke (порядок

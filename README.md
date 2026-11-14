@@ -120,4 +120,4 @@ hfctl bench --json > b.json # машиночитаемый артефакт
 - Модель в ответах «думает дольше ответа»: у клиентов с маленьким
   `max_tokens` ставь `reasoning_effort:"none"` (или `max_tokens ≥ 400`).
 
-Детали и спецификация: `spec/hfctl.md` (UX), `spec/plan.md` (план/DoD).
+Детали и спецификация: `.dev/SPEC.md` (UX), `.dev/PLAN.md` (план/DoD).
