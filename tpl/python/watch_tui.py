@@ -428,11 +428,16 @@ def fmt_tok(v):
     return str(int(v))
 
 
-def temp_color(deg):
+def temp_color(deg, fmt=None):
+    # @param 2: callable  # печататель числа (fmt_c/fmti) — порог сравнивается
+    #   по НАПЕЧАТАННОМУ значению (defects/polish: 79.95 печатается «80.0»);
+    #   без fmt — сравнение по сырому числу
     # @returns integer  # curses-pair подсветки температуры: None→0,
     #   ≥90 → C_RED, 80…89.9 → C_YELLOW, иначе 0 (пороги от пользователя)
     if deg is None:
         return 0
+    if fmt is not None:
+        deg = float(fmt(deg))
     if deg >= 90:
         return C_RED
     if deg >= 80:
@@ -609,6 +614,15 @@ def selfcheck():
     ck('temp_color границы', temp_color(79.9) == 0 and temp_color(80) == C_YELLOW
        and temp_color(89.9) == C_YELLOW and temp_color(90) == C_RED)
     ck('temp_color None → 0', temp_color(None) == 0)
+    # Пороги ПО НАПЕЧАТАННОМУ числу (defects/polish): fmt_c — %.1f с округлением,
+    # fmti — int() усечение (GPU-строка: 79.96 печатается «79» → без цвета)
+    ck('temp_color как печатается: 79.95→"80.0"→жёлтый',
+       fmt_c(79.95) == '80.0' and temp_color(79.95, fmt_c) == C_YELLOW)
+    ck('temp_color как печатается: 89.96→"90.0"→красный',
+       fmt_c(89.96) == '90.0' and temp_color(89.96, fmt_c) == C_RED)
+    ck('temp_color fmti: 79.96→"79"→0, 89.96→"89"→жёлтый',
+       temp_color(79.96, fmti) == 0 and temp_color(89.96, fmti) == C_YELLOW)
+    ck('temp_color fmti: 90.0→"90"→красный', temp_color(90.0, fmti) == C_RED)
     ck('plain cache tok формат',
        'cache tok: 99.1k' in
        fmt_plain(dict(PLAIN_SNAP, metrics=dict(
@@ -1186,8 +1200,8 @@ class Watch:
                 ('GPU load', fmti(gp.get('busy_pct')) + '%', busy_attr),
                 ('GPU power', fmti(gp.get('power_w')) + ' W'),
                 ('GPU temp', fmti(gp.get('temp_c')) + g.deg,
-                 self.attr(temp_color(gp.get('temp_c')))),
-                ('CPU temp', fmt_c(cpu) + g.deg, self.attr(temp_color(cpu)))]
+                 self.attr(temp_color(gp.get('temp_c'), fmti))),
+                ('CPU temp', fmt_c(cpu) + g.deg, self.attr(temp_color(cpu, fmt_c)))]
 
     def rows_speed(self, snap, d, W):
         # Честные метрики (D8): decode = recent_tok_s (последний завершённый

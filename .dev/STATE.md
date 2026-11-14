@@ -222,3 +222,4 @@
 
 Обновлено: 2026-11-14 (миграция борда в `.dev/`; этапы 10 и 11; текущий
 сабстэдж engine/0.4.6 — код закрыт, ждёт пуша/GO).
+- 2026-11-14: сабстэдж `defects/polish` ПРИНЯТ (ревью APPROVED r1; tester skipped — шаблонный комментарий + сравнение чисел, selfcheck 52/52, машины не трогались): перенос комментария KillMode в hipfire-compose.service.tpl (journal-шум «Failed to parse kill mode» с 11-12) + temp_color по печатаемому числу (CPU %.1f, GPU int). Хвост: systemd-analyze verify и пересоздание юнитов — при доставке на машине (окно даунтайма, правило одного машины).

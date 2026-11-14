@@ -5,7 +5,8 @@ After=podman-user-wait-network-online.service
 [Service]
 Type=oneshot
 RemainAfterExit=yes
-KillMode=process          # не убивать cgroup контейнеров при остановке юнита
+# не убивать cgroup контейнеров при остановке юнита
+KillMode=process
 WorkingDirectory=__STACK_DIR__
 ExecStart=/usr/bin/env bash __STACK_DIR__/hfctl _boot
 ExecStop=__PODMAN_BIN__ compose __CF__ stop

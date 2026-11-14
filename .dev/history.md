@@ -78,3 +78,7 @@
   оркестратором с артефактом. Пуш — пользователь, затем доставка файлов
   на обе машины (D12).
 - 2026-11-14: миграция борда `spec/` + `flow/` → `.dev/` (решение пользователя): git mv по карте `.dev/README.md`; spec/state.md + flow/STATE.md слиты в STATE.md (добавлены этапы 10 и 11); spec/review.md → append tasks/9.md; PLAN.md — разделы этапов 10/11; AGENTS.md/README.md — новые пути. Legacy-артефакты не переписаны.
+- 2026-11-14: defects/polish: brief/task оркестратора → developer (2 файла,
+  selfcheck 48→52) → reviewer APPROVED (пересчитал границы сам; systemd-analyze
+  недоступен в ocbox — verify перенесён на машинную доставку). Коммит —
+  оркестратор; пуш — пользователь; доставка юнитов — окном на одной машине.
