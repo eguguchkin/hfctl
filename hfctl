@@ -32,8 +32,8 @@ set -euo pipefail
 # @typedef systemd_unit: /^hipfire-[\w-]+$/
 
 # ── конфигурация (env переопределяет) ───────────────────────────────────────
-# @type /^[\w./-]+:[\w.-]+$/ IMAGE="${HFCTL_IMAGE:-ghcr.io/warpfront/hipfire:0.4.5}" # образ ghcr с тегом; переопределение — env HFCTL_IMAGE
-IMAGE="${HFCTL_IMAGE:-ghcr.io/warpfront/hipfire:0.4.5}"
+# @type /^[\w./-]+:[\w.-]+$/ IMAGE="${HFCTL_IMAGE:-ghcr.io/warpfront/hipfire:0.4.6}" # образ ghcr с тегом; переопределение — env HFCTL_IMAGE
+IMAGE="${HFCTL_IMAGE:-ghcr.io/warpfront/hipfire:0.4.6}"
 STACK_DIR="${HFCTL_DIR:-$HOME/hipfire}"          # всё инсталляция здесь (compose, .env, бинарь)
 MODELS_BASE="${HFCTL_MODELS:-$STACK_DIR/models}" # база моделей; внутри — каталог-сет на профиль
 MODELS_DIR="$MODELS_BASE/27b"                    # маунт; пересчитывается set_models_dir()

@@ -57,3 +57,13 @@
   решение: прерывать ТОЛЬКО по GO (живой трафик). Кратко: сабстэдж
   engine/0.4.6, brief.md готов (DoD 1–6), лабораторный канал HFCTL_IMAGE,
   приёмка B→evo до кода (правило 5 hflab), D11/D12 применяются.
+- 2026-11-14: engine/0.4.6 закрыт: лабораторная приёмка EXP-B/EXP-EVO PASS
+  (машина B: fn-lanes staged lanes=4 spec=mtp, bench quick 75.8 ≥ 75.22,
+  init «Already downloaded», doctor rc=0; evo: spec dflash, bare-bench ×3
+  131.0/13.18 против 130.5/13.18; md5 бинарей 0.4.6 hipfire 00c1815b,
+  daemon 390daa1d); task оркестратора (механический форк, D11) → developer
+  (пин hfctl:35–36 + stack_files.sh mandated-пометка; dev-report) →
+  reviewer APPROVED (review.md). tester skipped: механический пин + комменты
+  без product-behavior контракта, машинная приёмка уже зелёная (D11).
+  Отклонение developer'а (п.4 task: spec/status.md не существует, статус
+  правит оркестратор) — принято. Коммит кода оркестратором; пуш — пользователь.
