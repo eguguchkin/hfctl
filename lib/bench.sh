@@ -402,7 +402,16 @@ bench_parallel() {
       awk -v a="$w0" -v b="$w1" 'BEGIN{printf "%.1f\n", b-a}' > "$BENCH_TMP/par_wall_$i"
     ) &
   done
-  wait
+  # wait -n вместо wait: (1) реет фоновые джобы — без wait'а неинтерактивный
+  # bash их не реет и jobs -p вечно непустой, цикл бы висел после финиша
+  # curl'ов; (2) прерывается trapped-INT/TERM сразу (wait без -n откладывает
+  # трап до завершения ВСЕХ джобов — механизм EXP-102). sleep 1 — только
+  # fallback на случай ошибки wait -n (race на пустой таблице).
+  while :; do
+    [ -s "$BENCH_ABORT_FLAG" ] && break
+    [ -z "$(jobs -p 2>/dev/null)" ] && break
+    wait -n 2>/dev/null || sleep 1
+  done
   t1=$(date +%s.%N)
   tw=$(awk -v a="$t0" -v b="$t1" 'BEGIN{printf "%.3f", b-a}')
   sum=0
@@ -526,14 +535,22 @@ bench_hol() {
 bench_abort() {
   local sig="$1" rc="$2" p
   trap - INT TERM
+  [ -n "${BENCH_ABORT_FLAG:-}" ] && echo 1 > "$BENCH_ABORT_FLAG" 2>/dev/null
   # Порядок важен: сначала ВНУТРЕННИЕ дети фоновых subshell'ов (curl'ы), пока
   # их родители живы и PPid совпадает, — иначе после гибели subshell'а curl
   # переописывается и -P его не находит.
   for p in $(jobs -p 2>/dev/null); do
-    pkill -TERM -P "$p" 2>/dev/null || true        # curl/process-group-потомки внутри них
+    pkill -TERM -P "$p" 2>/dev/null || true        # curl внутри фоновых subshell'ов
   done
-  pkill -TERM -P $$ 2>/dev/null || true            # foreground-дети + фоновые subshell'ы
-  wait 2>/dev/null || true
+  # точечный kill по fd: pkill -P $$ убил бы ВСЮ потомственную иерархию
+  # (включая обёртки запустившего терминала) — осиротевший curl держит fd
+  # на файлы уникального per-run BENCH_TMP, ложных совпадений нет
+  for fd in /proc/[0-9]*/fd/*; do
+    [ "$(readlink -f "$fd" 2>/dev/null)" = "$BENCH_TMP" ] || continue
+    p="${fd#/proc/}"; pkill -TERM "${p%%/*}" 2>/dev/null || true
+  done
+  # wait НЕ ставим: фоновые джобы ignore SIGINT (POSIX), wait завис бы на
+  # их полное время жизни — убиваем явно и выходим
   printf 'bench: прервано (%s) — незавершённый прогон НЕ сохранён\n' "$sig" >&2
   exit "$rc"
 }
@@ -630,9 +647,11 @@ cmd_bench() {
   [ "$json_out" = 1 ] && exec 4>&1 1>&2
 
   BENCH_TMP="$(mktemp -d "${TMPDIR:-/tmp}/hfctl-bench.XXXXXX")"
+  BENCH_ABORT_FLAG="$BENCH_TMP/.abort"
   trap 'rm -rf "$BENCH_TMP"' EXIT
   # Прерываемость (bench/interrupt): INT/TERM — явный трап (bench_parallel
-  # прерывался только «наполовину»: фоновые curl игнорируют SIGINT по POSIX).
+  # прерывался только «наполовину»: фоновые curl игнорируют SIGINT по POSIX,
+  # а wait на них держит bash без проверки трапа до конца джобов).
   trap 'bench_abort INT 130' INT
   trap 'bench_abort TERM 143' TERM
   : > "$BENCH_TMP/runs.tsv"
