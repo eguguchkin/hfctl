@@ -27,6 +27,9 @@ hfctl bench — бенч производительности сервера (л
   hfctl bench full             все 8 сценариев: + prefill-100k, long-gen,
                                parallel N=2/N=4, HOL, ar-baseline
   hfctl bench --runs N         повторов на сценарий (default 3, допустимо 1–20)
+  hfctl bench --parallel N[,M…] параллельные батчи поверх quick/full (целые
+                               1..8 через запятую; каждый — один прогон;
+                               full без флага = 2,4)
   hfctl bench --out DIR        каталог артефактов (default $STACK_DIR/bench-runs)
   hfctl bench --json           машиночитаемый JSON в stdout (артефакт всё равно пишется)
   hfctl bench --compare [FILE] дельта с прошлым прогоном (без FILE — свежайший json)
@@ -360,22 +363,24 @@ bench_longgen() {
 # Побочные эффекты: N РЕАЛЬНЫХ параллельных генераций (сеть, токены; таймаут
 #   300 с на запрос, N параллельных subshell'ов curl+date+awk); удаляет
 #   старые $BENCH_TMP/par_resp_* и par_wall_*, пишет par$i.json,
-#   par_resp_$i, par_wall_$i; допись parallel-$n в runs.tsv; EXPORT
-#   B_NOTE_parallel_$n; строки интерпретации в stdout, warn в stderr;
+#   par_resp_$i, par_wall_$i; допись parallel-$n в runs.tsv (колонка 7 —
+#   per-request wall по позиции запуска через запятую, только валидные i);
+#   EXPORT B_NOTE_parallel_$n; строки интерпретации в stdout, warn в stderr;
 #   подпроцессы python3 (par_usage.py), awk, curl, date; читает глобалы
 #   ROUTE, MED_SOLO_CODE, BENCH_TMP, TPL_DIR (через bench_med/bench_slots).
 #
 # Ограничения/допущения: сервер ready; требует $BENCH_TMP/c_prose.txt и
 #   c_code.txt (создаёт cmd_bench) и глобалы ROUTE (интерпретация),
 #   BENCH_TMP, PORT; MED_SOLO_CODE опционален — без него процент
-#   масштабирования не считается; запрос без ответа/usage — warn и вне суммы;
-#   нулевая сумма — сценарий пропущен (всё равно 0); интерпретация зовёт
-#   bench_slots (ещё один GET /health) на multi-slot.
+#   масштабирования не считается; запрос без ответа/usage — warn и вне суммы
+#   И вне walls; нулевая сумма — сценарий пропущен (всё равно 0);
+#   интерпретация зовёт bench_slots (ещё один GET /health) на multi-slot;
+#   порядок walls = порядок запуска (позиция в FIFO), НЕ сортируется.
 #
-# @param 1: /\d+/      # N — число одновременных запросов (вызывающие дают 2 и 4)
+# @param 1: /\d+/      # N — число одновременных запросов (cmd_bench даёт PAR_LIST 1..8)
 # @returns integer     # всегда 0 (частичные неудачи — warn, не rc)
 bench_parallel() {
-  local n="$1" i t0 t1 tw sum tk fails=0 pw=""
+  local n="$1" i t0 t1 tw sum tk fails=0 pw="" walls=""
   for i in $(seq 1 "$n"); do
     if [ $((i % 2)) = 1 ]; then
       bench_payload "$BENCH_TMP/par$i.json" "$BENCH_TMP/c_prose.txt" 300
@@ -404,19 +409,31 @@ bench_parallel() {
     if [ -s "$BENCH_TMP/par_resp_$i" ]; then
       tk=$(python3 "$TPL_DIR/python/par_usage.py" "$BENCH_TMP/par_resp_$i" 2>/dev/null || true)
     fi
-    case "$tk" in ''|*[!0-9]*) fails=$((fails+1)) ;; *) sum=$((sum+tk)) ;; esac
+    case "$tk" in
+      ''|*[!0-9]*) fails=$((fails+1)) ;;
+      *) sum=$((sum+tk))
+         # walls — только валидные i, порядок запуска (= позиция в FIFO), не сортируем
+         [ -s "$BENCH_TMP/par_wall_$i" ] && walls="${walls}${walls:+,}$(cat "$BENCH_TMP/par_wall_$i")" ;;
+    esac
   done
   [ "$fails" = 0 ] || warn "parallel-$n: $fails из $n запросов не удались (curl/usage)"
   if [ "$sum" -eq 0 ]; then
     warn "parallel-$n: ни одного ответа с usage — сценарий пропущен"
     return 0
   fi
-  printf 'parallel-%s\t%s\t%s\t%s\t-\t-\n' "$n" "$tw" "$sum" \
-    "$(awk -v s="$sum" -v s2="$tw" 'BEGIN{printf "%.2f", s/s2}')" >> "$BENCH_TMP/runs.tsv"
-  for i in $(seq 1 "$n"); do
-    [ -s "$BENCH_TMP/par_wall_$i" ] && pw="$pw$(cat "$BENCH_TMP/par_wall_$i")с " || true
-  done
-  export B_NOTE_parallel_$n="per-request wall: ${pw:-нет данных}"
+  printf 'parallel-%s\t%s\t%s\t%s\t-\t-\t%s\n' "$n" "$tw" "$sum" \
+    "$(awk -v s="$sum" -v s2="$tw" 'BEGIN{printf "%.2f", s/s2}')" "${walls:--}" >> "$BENCH_TMP/runs.tsv"
+  if [ -n "$walls" ]; then
+    pw=$(printf '%s' "$walls" | awk -F',' '
+      { s=""; mn=$1; mx=$1
+        for (i=1; i<=NF; i++) { s = s (i > 1 ? " " : "") $i "с"
+          if ($i+0 < mn+0) mn=$i; if ($i+0 > mx+0) mx=$i }
+        if (NF > 1) s = s sprintf(" (разброс %s–%s с)", mn, mx)
+        printf "%s", s }')
+    export B_NOTE_parallel_$n="per-request wall (curl, по позиции запуска): $pw"
+  else
+    export B_NOTE_parallel_$n="per-request wall (curl): нет данных"
+  fi
   case "$ROUTE" in
     lanes)
       if [ -n "${MED_SOLO_CODE:-}" ]; then
@@ -483,9 +500,10 @@ bench_hol() {
 # Назначение: `hfctl bench` — локальный бенч производительности живого
 #   сервера: фикстуры + md5-гейт → health (с --fresh — recreate+wait_health)
 #   → прогрев → сценарии (quick: solo-code, solo-prose, ttft; full: ещё
-#   prefill-100k, long-gen, parallel 2/4, HOL; ar-baseline печатается
-#   пропущенным) → артефакт JSON, таблица (bench_report.py report) и дельта
-#   --compare.
+#   prefill-100k, long-gen, parallel из --parallel (дефолт 2/4), HOL;
+#   ar-baseline печатается пропущенным) → артефакт JSON, таблица
+#   (bench_report.py report) и дельта --compare. quick с --parallel —
+#   параллельные батчи поверх quick-тройки (после снятия MED_SOLO_CODE).
 #
 # Побочные эффекты:
 #   Файлы: mktemp-каталог BENCH_TMP с trap 'rm -rf' на EXIT (runs.tsv,
@@ -498,7 +516,8 @@ bench_hol() {
 #     артефакт).
 #   Сеть/сервер: РЕАЛЬНЫЕ генерации — прогрев + (quick) 2×RUNS генераций и
 #     RUNS стримингов; (full) ещё RUNS×(prefill ~100K токенов, long-gen
-#     4096 токенов, параллельные 2+4 за батч, HOL-пары); GET /health +
+#     4096 токенов, параллельные батчи из PAR_LIST за батч, HOL-пары;
+#     quick с --parallel — те же параллельные батчи поверх тройки); GET /health +
 #     wait_health 900 при незавершенной загрузке модели; с --fresh —
 #     compose up -d --force-recreate (ЕДИНСТВЕННЫЙ режим, трогающий сервер)
 #     и повторный wait_health 900.
@@ -521,11 +540,13 @@ bench_hol() {
 #   ('' — не задан; compare «auto» — режим автовыбора бейслайна).
 #
 # @param 1..N: string[]           # режим и флаги: 'quick' | 'full' (default quick),
-#   --runs <целое 1–20> (default 3), --out <каталог>, --json,
+#   --runs <целое 1–20> (default 3), --parallel <N[,M…]> (целые 1..8 через
+#   запятую; дефолт quick — без параллельного блока, full — «2 4»; флаг
+#   ЗАМЕНЯЕТ список в любом режиме), --out <каталог>, --json,
 #   --compare [<файл>] (default свежайший json в --out), --fresh, --help
 # @returns integer                # всегда 0 при возврате — отказы завершают процесс через die
 cmd_bench() {
-  local mode="quick" runs=3 out_dir="" json_out=0 compare="" fresh=0
+  local mode="quick" runs=3 out_dir="" json_out=0 compare="" fresh=0 par_list="" pn
   while [ $# -gt 0 ]; do
     case "$1" in
       full|quick) mode="$1"; shift ;;
@@ -533,6 +554,15 @@ cmd_bench() {
         case "${2:-}" in ''|*[!0-9]*) die "--runs: целое 1–20 (получено '${2:-}')" ;; esac
         [ "$2" -ge 1 ] && [ "$2" -le 20 ] || die "--runs: целое 1–20 (получено '$2')"
         runs="$2"; shift 2 ;;
+      --parallel)
+        [[ "${2:-}" =~ ^[0-9]+(,[0-9]+)*$ ]] \
+          || die "--parallel: целые 1..8 через запятую (получено '${2:-}')"
+        for pn in ${2//,/ }; do
+          if [ "$pn" -lt 1 ] || [ "$pn" -gt 8 ]; then
+            die "--parallel: целые 1..8 через запятую (получено '$2')"
+          fi
+        done
+        par_list=${2//,/ }; shift 2 ;;
       --out) [ -n "${2:-}" ] || die "--out: укажи каталог"; out_dir="$2"; shift 2 ;;
       --json) json_out=1; shift ;;
       --fresh) fresh=1; shift ;;
@@ -543,6 +573,10 @@ cmd_bench() {
       *) die "неизвестный флаг bench: $1 (см. hfctl bench --help)" ;;
     esac
   done
+
+  # Параллельные батчи: явный --parallel перезадает список в любом режиме
+  # (порядок пользователя сохраняется); дефолт — только у full («2 4»).
+  if [ -z "$par_list" ] && [ "$mode" = full ]; then par_list="2 4"; fi
 
   [ -f "$STACK_DIR/.env" ] || die "стек не установлен — сначала 'hfctl install'"
   local v
@@ -556,7 +590,6 @@ cmd_bench() {
   trap 'rm -rf "$BENCH_TMP"' EXIT
   : > "$BENCH_TMP/runs.tsv"
   OUT="${out_dir:-$STACK_DIR/bench-runs}"
-  mkdir -p "$OUT"
   RUNS="$runs"
 
   local prof model md5_real body img ts_iso fname artifact base=""
@@ -610,13 +643,16 @@ cmd_bench() {
   MED_SOLO_CODE=$(bench_med solo-code 4 || true)
   bench_solo solo-prose "$BENCH_TMP/c_prose.txt" 400
   bench_ttft
+  if [ "$mode" = quick ] && [ -n "$par_list" ]; then
+    log "параллельные батчи: $par_list"
+    for pn in $par_list; do bench_parallel "$pn"; done
+  fi
 
   if [ "$mode" = full ]; then
     log "сценарии full"
     bench_prefill
     bench_longgen
-    bench_parallel 2
-    bench_parallel 4
+    for pn in $par_list; do bench_parallel "$pn"; done
     bench_hol
     echo "ar-baseline: пропущен (сравнение спекуляция/нет — через use разных профилей)"
     local med_hol note_hol=""
@@ -645,6 +681,7 @@ cmd_bench() {
   if [ "$mode" = full ]; then B_FULL=1; else B_FULL=0; fi
   export B_FULL
   python3 "$TPL_DIR/python/bench_report.py" artifact > "$BENCH_TMP/artifact.json"
+  mkdir -p "$OUT"   # каталог создаётся только под реальную запись (битый health = чисто в песочнице)
   cp "$BENCH_TMP/artifact.json" "$OUT/$fname"
   artifact=$(cat "$BENCH_TMP/artifact.json")
 

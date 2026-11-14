@@ -20,7 +20,7 @@
 #   on | off                     — автозапуск вкл / выкл (off = стоп + снятие
 #                                  с автозапуска; файлы/модели/образ целы)
 #   uninstall [--purge-models] [--purge-image]
-#   bench [full] [--runs N] [--out DIR] [--json] [--compare [FILE]] [--fresh]
+#   bench [full] [--runs N] [--parallel N[,M…]] [--out DIR] [--json] [--compare [FILE]] [--fresh]
 # === USAGE-END ===
 set -euo pipefail
 

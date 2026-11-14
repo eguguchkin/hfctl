@@ -1,4 +1,4 @@
-import json, os, statistics, sys
+import json, os, re, statistics, sys
 
 def _f(x):
     x = (x or "").strip()
@@ -16,26 +16,38 @@ def load_runs():
         p = line.rstrip("\n").split("\t")
         if len(p) < 6 or not p[0]:
             continue
-        runs.setdefault(p[0], []).append({
-            "wall": _f(p[1]), "tokens": _n(p[2]), "tok_s": _f(p[3]),
-            "tau": _f(p[4]), "ttft_ms": _f(p[5])})
+        e = {"wall": _f(p[1]), "tokens": _n(p[2]), "tok_s": _f(p[3]),
+             "tau": _f(p[4]), "ttft_ms": _f(p[5])}
+        if len(p) > 6 and p[6] not in ("", "-"):  # колонка 7 — additive (parallel-N)
+            e["walls"] = [float(x) for x in p[6].split(",")]
+        runs.setdefault(p[0], []).append(e)
     return runs
 
 ORDER = ["solo-code", "solo-prose", "ttft", "prefill-100k", "long-gen",
          "parallel-2", "parallel-4", "hol", "ar-baseline"]
 UNITS = {"ttft": "мс", "hol": "с", "prefill-100k": "tok/s",
          "parallel-2": "tok/s agg", "parallel-4": "tok/s agg"}
+RE_PAR = re.compile(r"^parallel-\d+$")
+
+def scen_order(keys):
+    """Порядок сценариев: известные из ORDER + любые parallel-<N> после них
+    по возрастанию N (динамический --parallel)."""
+    return list(ORDER) + sorted((k for k in keys if RE_PAR.match(k) and k not in ORDER),
+                                key=lambda k: int(k.split("-")[1]))
+
+def unit_of(sc):
+    return "tok/s agg" if RE_PAR.match(sc) else UNITS.get(sc, "tok/s")
 # главная метрика сценария (для сводки и сравнения): tok_s у скоростных,
 # ttft у отзывчивости, wall у HOL
 MAIN = {"ttft": ("ttft_ms", "мс"), "hol": ("wall", "с")}
 
 def main_vals(sc, rs):
-    key, unit = MAIN.get(sc, ("tok_s", UNITS.get(sc, "tok/s")))
+    key, unit = MAIN.get(sc, ("tok_s", unit_of(sc)))
     return unit, [e.get(key) for e in rs if e.get(key) is not None]
 
 def summary_of(runs):
     sm = {}
-    for sc in ORDER:
+    for sc in scen_order(runs):
         rs = runs.get(sc) or []
         if not rs:
             continue
@@ -65,7 +77,7 @@ def fmt_med(vals, unit, sc, nd=2):
 def do_report(runs):
     print()
     print("%-18s %-30s %-9s %-18s %s" % ("сценарий", "decode", "τ", "TTFT", "примечание"))
-    for sc in ORDER:
+    for sc in scen_order(runs):
         rs = runs.get(sc) or []
         if not rs:
             continue
@@ -81,7 +93,7 @@ def do_report(runs):
         elif sc != "ar-baseline":
             vals = [e["tok_s"] for e in rs if e.get("tok_s") is not None]
             if vals:
-                dec = fmt_med(vals, UNITS.get(sc, "tok/s"), sc)
+                dec = fmt_med(vals, unit_of(sc), sc)
         taus = [e["tau"] for e in rs if e.get("tau") is not None]
         if taus:
             tau = "%.2f" % statistics.median(taus)
@@ -109,7 +121,7 @@ def do_compare(basefile):
     bsm, csm = base.get("summary") or {}, cur.get("summary") or {}
     print("сравнение с прошлым прогоном (%s):" % os.path.basename(basefile))
     n = 0
-    for sc in ORDER:
+    for sc in scen_order(set(csm) | set(bsm)):
         c, b = csm.get(sc) or {}, bsm.get(sc) or {}
         cm, bm = c.get("median"), b.get("median")
         if cm is None or bm is None or not bm:

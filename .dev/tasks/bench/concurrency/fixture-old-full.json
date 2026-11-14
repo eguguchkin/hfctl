@@ -1,0 +1,49 @@
+{
+ "timestamp": "2026-11-13T11:00:00+0500",
+ "profile": "flash-multi",
+ "model": "qwen3.8-flash-next:mq4-xts",
+ "route": "lanes",
+ "image": "ghcr.io/warpfront/hipfire:0.4.6",
+ "fixture_md5": "253c7ac50857fe6d0e10fb0d2c5e35c0",
+ "hfctl_version_placeholder": "",
+ "runs": {
+  "solo-code": [
+   {"wall": 5.28, "tokens": 400, "tok_s": 75.76, "tau": 5.0, "ttft_ms": null},
+   {"wall": 5.26, "tokens": 400, "tok_s": 76.05, "tau": 5.0, "ttft_ms": null}
+  ],
+  "solo-prose": [
+   {"wall": 10.5, "tokens": 400, "tok_s": 38.1, "tau": 3.1, "ttft_ms": null}
+  ],
+  "ttft": [
+   {"wall": null, "tokens": null, "tok_s": null, "tau": null, "ttft_ms": 402.0},
+   {"wall": null, "tokens": null, "tok_s": null, "tau": null, "ttft_ms": 398.0}
+  ],
+  "prefill-100k": [
+   {"wall": 120.4, "tokens": 99812, "tok_s": 833.1, "tau": null, "ttft_ms": null}
+  ],
+  "long-gen": [
+   {"wall": 55.1, "tokens": 4096, "tok_s": 74.34, "tau": null, "ttft_ms": null}
+  ],
+  "parallel-2": [
+   {"wall": 11.2, "tokens": 600, "tok_s": 53.57, "tau": null, "ttft_ms": null}
+  ],
+  "parallel-4": [
+   {"wall": 11.8, "tokens": 1200, "tok_s": 101.69, "tau": null, "ttft_ms": null}
+  ],
+  "hol": [
+   {"wall": 3.1, "tokens": null, "tok_s": null, "tau": null, "ttft_ms": null}
+  ]
+ },
+ "summary": {
+  "solo-code": {"median": 75.905, "min": 75.76, "max": 76.05, "unit": "tok/s"},
+  "solo-prose": {"median": 38.1, "min": 38.1, "max": 38.1, "unit": "tok/s"},
+  "ttft": {"median": 400, "min": 398, "max": 402, "unit": "мс"},
+  "prefill-100k": {"median": 833.1, "min": 833.1, "max": 833.1, "unit": "tok/s"},
+  "long-gen": {"median": 74.34, "min": 74.34, "max": 74.34, "unit": "tok/s"},
+  "parallel-2": {"median": 53.57, "min": 53.57, "max": 53.57, "unit": "tok/s agg"},
+  "parallel-4": {"median": 101.69, "min": 101.69, "max": 101.69, "unit": "tok/s agg"},
+  "hol": {"median": 3.1, "min": 3.1, "max": 3.1, "unit": "с"},
+  "ar-baseline": {"unit": "—", "median": null, "min": null, "max": null,
+                  "note": "пропущен (сравнение спекуляция/нет — через use разных профилей)"}
+ }
+}
