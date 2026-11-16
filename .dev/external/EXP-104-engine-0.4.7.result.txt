@@ -52,3 +52,22 @@ Bench (image ghcr.io/warpfront/hipfire:0.4.7, route lanes):
   solo-prose median 23.98 tok/s; ttft median 155.0 мс
 Чистота замера: чужих_за_время_bench=0 (проверка после bench, 150 c).
 RESULT: PASS — 0.4.7: healthy/smoke (прогон 1) + тихий bench в пределах 5% от бейзлайна
+
+──── EXP-104 на che-evo (2026-11-16, GO пользователя, профиль 27b-single) ────
+Пререквизит: scp бинарь 7341519 → /tmp/hfctl-0.4.7 (md5 3cc8d30a… совпал).
+Шаги 1–3: use 27b-single → pull/recreate 0.4.7, HEALTHY после 10с, smoke 2/2
+("ок"/"print hello world"), роут singleton+DFlash, автозапуск обновлён.
+Bench-часть (прогон 1): queue=0 (тихо), solo-code 66.19 tok/s vs бейзлайн
+131.0 → FAIL "-49.5%". Причина — НЕ образ: бейзлайн 131.0 — это цифры
+ДРУГОГО сценария (_bench_arms.sh, промпт merge_sort); hfctl bench quick на
+evo исторически даёт ~66 tok/s τ=6.80 (llm-lab .dev/BENCH.md, «Грабля
+сравнения»: hfctl bench quick НЕ сравнивать с 130.5/13.18). В quick-сценарии
+A/B того же дня: 0.4.7 = 66.19 vs 0.4.6 = 65.93 — паритет.
+Честный bench (сценарий bench_arms, промпт merge_sort md5 253c7ac5, 3×3,
+max-tokens 256, stateless, noslots) на 0.4.7 — dflash_47:
+  run1 decode 130.7–130.9 | run2 122.9–123.1 | run3 130.9  tok/s, τ=13.18 (все),
+  prefill ~114–115 tok/s, ttft ~331–333 мс
+  против эталона 0.4.6 = 131.0/13.18 (lab 11-14) и 0.4.5 = 130.5/13.18.
+RESULT: PASS — EXP-104 (evo): 0.4.7 healthy/smoke/route-dflash; decode-паритет
+с 0.4.6 в обоих сценариях (130.9 vs 131.0 bench_arms; 66.19 vs 65.93 quick).
+Примечание: serve-контейнер после bench-цикла поднялся, healthy (проверено).
