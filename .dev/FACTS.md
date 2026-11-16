@@ -89,6 +89,26 @@
 - На машине B контейнер-лог активно пишется (чужой/наш трафик chatcmpl) —
   лог-зона TUI будет живой в реальном использовании.
 
+## Движок 0.4.7 (проверено оркестратором, 2026-11-16)
+F-0.4.7.1 — `v0.4.7` = последний апстрим-тег (клон `/workspace/hipfire`,
+`git fetch --tags`; дальше только archive/safety/rescue).
+F-0.4.7.2 — ghcr.io/warpfront/hipfire: тег `0.4.7` существует (manifest 200
+с анонимным pull-токеном); `0.4.6`/`latest` тоже 200.
+F-0.4.7.3 — `compose.yml` и `compose.halo.yml` в v0.4.7 байт-идентичны v0.4.5/
+v0.4.6 (`git diff v0.4.6..v0.4.7 -- compose*` пуст) → golden'ы tpl/compose
+валидны для 0.4.7 без правок.
+F-0.4.7.4 — реестр моделей не менялся в v0.4.6..v0.4.7 (ни одного registry-
+файла в diff) → dflash-sidecar-вайринг наших тегов (вкл. `qwen3.8:27b-mq4-xts`
++ draft) не изменился; схема конфига без новых обязательных ключей
+(CONFIG.md: только расширение описания VMM-авто-выбора, #1058).
+F-0.4.7.5 — changelog v0.4.6..v0.4.7: фикс-хэви (гated_delta_net/rotate_with_rms
+ядра gfx9/gfx1201, vision откаты commit-wait, deepseek4 fail-closed DSML,
+qwen35 eager top-K MoE decode #1149, VMM #1058 — авто-выбор KV доказывает
+`hipMemAddressReserve` до загрузки весов, при неудаче → legacy с reason в логе;
+явный `--kv-backend vmm` в этом случае отказывается). Движковые дефолты
+наших serve-конфигов не менялись (SERVE.md — docs-only).
+F-0.4.7.6 — 0.4.7 на машинах ещё не проверялась (приёмка — EXP-104).
+
 ## Контекст
 - Движок имеет собственный `hipfire tui` (ratatui,
   `/workspace/hipfire/crates/hipfire-tui/`), но он в контейнере: не видит
