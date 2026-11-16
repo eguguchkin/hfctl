@@ -416,6 +416,10 @@ compose.yml/compose.halo.yml байт-идентичны 0.4.5/0.4.6 (F-0.4.7.3)
 - [x] 12.1 пин по умолчанию 0.4.7 (`hfctl:35–36`) + mandated-пометка
       байт-идентичности compose-голден'ов 0.4.5/0.4.6/0.4.7
       (`lib/stack_files.sh`) — APPROVED (2026-11-16, tester skipped по D11)
-- [ ] EXP-104: машинная приёмка 0.4.7 (recreate/healthy/smoke/dflash/bench
-      quick ≤5% от бейзлайнов) — ждёт GO пользователя
-- [ ] Доставка: пуш + install.sh на машины (D12)
+- [x] EXP-104: машинная приёмка 0.4.7 на машине B (GO пользователя) —
+      PASS (2026-11-16): recreate → healthy 20 c → smoke 2/2 → route lanes;
+      тихий bench solo-code 75.58 tok/s против бейзлайна 75.8 (−0.3%,
+      чужих запросов во время замера 0). Прогон 1 FAIL (дефекты
+      EXP-скрипта: dflash-assert для lanes-профиля; окно не тихое) —
+      исправлены, прогон 2 чистый; артефакты `.dev/external/EXP-104*`
+- [ ] Приёмка на evo + доставка: пуш + install.sh (D12) — при доставке

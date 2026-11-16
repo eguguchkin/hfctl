@@ -34,18 +34,34 @@ case "$img" in
 esac
 
 # 4) bench quick (3 сценария, ≤90 c) + чек соло-кода и route
+#    СНАЧАЛА тишина окна: очередь пуста и в последних логах нет чужих
+#    запросов (урок contamin-прогона 11:50 на B) — под трафиком не мерить.
+q=$(curl -s http://127.0.0.1:11435/stats | grep -o '"queue_depth":[0-9]*' | grep -o '[0-9]*$' || echo "?")
+echo "queue_depth перед bench: $q"
+[ "$q" = "0" ] || fail "окно не тихое: queue_depth=$q (чужой трафик) — перенести bench"
+noise=$(podman logs --since 30s hipfire 2>&1 | grep -ciE 'chatcmpl|POST /v1' || true)
+[ "$noise" = 0 ] || fail "окно не тихое: $noise чужих запросов за 30 с"
 art=$("$ST/hfctl" bench --json 2>/dev/null) || fail "bench quick не завершился"
 echo "$art" | grep -E '"(image|route|solo-code|median|unit)"' | head -8
-BENCH_ART="$art" BASELINE_TOKS="$BASELINE_TOKS" python3 - <<'PY' || fail "bench-проверки (см. вывод выше)"
+# route для профиля: flash-multi = lanes (fn-lanes, бейзлайн 75.8 снят на
+# lanes); 27b-single = dflash. Проверяем ожидаемый route по профилю.
+case "$PROFILE" in
+  flash-multi) want=lanes ;;
+  27b-single)  want=dflash ;;
+  *) fail "неизвестный профиль $PROFILE — добавь ожидаемый route в скрипт" ;;
+esac
+BENCH_ART="$art" WANT_ROUTE="$want" BASELINE_TOKS="$BASELINE_TOKS" python3 - <<'PY' || fail "bench-проверки (см. вывод выше)"
 import json, os, sys
 a = json.loads(os.environ["BENCH_ART"])
 m = a["summary"]["solo-code"]["median"]
 base = float(os.environ["BASELINE_TOKS"])
-print("solo-code: %.2f tok/s (бейзлайн 0.4.6: %s); route: %s"
-      % (m, base, a.get("route")))
-assert "dflash" in a.get("route", ""), "route без dflash: %r" % a.get("route")
+want = os.environ["WANT_ROUTE"]
+route = a.get("route", "")
+print("solo-code: %.2f tok/s (бейзлайн 0.4.6: %s); route: %s (ждём %s)"
+      % (m, base, route, want))
+assert want in route, "route %r не содержит %s" % (route, want)
 d = (m - base) / base * 100.0
 assert abs(d) < 5.0, "отклонение solo-code %.1f%% (лимит 5%%)" % d
 print("solo-code отклонение %+.1f%% — в пределах 5%%" % d)
 PY
-echo "RESULT: PASS — 0.4.7: healthy, smoke, dflash, solo-code в пределах 5% от бейзлайна"
+echo "RESULT: PASS — 0.4.7: healthy, smoke, route=$PROFILE-канон, solo-code в пределах 5% от бейзлайна"

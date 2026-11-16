@@ -126,3 +126,10 @@
   TESTER SKIPPED (D11 лёгкий режим: механический пин, контракт поведения
   продукта не затронут; живая приёмка — EXP-104). EXP-104 создан
   (external/EXP-104-engine-0.4.7.sh), ждёт GO пользователя.
+- 2026-11-16: 12.1 engine/0.4.7 ЗАКРЫТ (EXP-104: прогон 1 FAIL — скрипт:
+  dflash-assert неверен для flash-multi/lanes + окно не тихое
+  (contamination, solo-code 41.4 невалиден); прогон 2 — тихий bench
+  чистый: solo-code 75.58 vs бейзлайн 75.8 = −0.3%, route lanes,
+  image 0.4.7 healthy 20 c, smoke 2/2). B на 0.4.7, автозапуск обновлён.
+  Артефакты: external/EXP-104-{engine-0.4.7.sh,result.txt,analysis.md}.
+  Хвост: пуш + evo/доставка (D12).

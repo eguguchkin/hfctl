@@ -1,0 +1,54 @@
+EXP-104 — прогон 1 (2026-11-16, машина B che-FAEX1, профиль flash-multi)
+Пререквизит: scp бинаря hfctl 7341519 → /tmp/hfctl-0.4.7 (md5 3cc8d30a… совпал)
+Результат EXP-104 прогон 1 (сырой вывод, хвост):
+
+  speculation.dflash = off
+  serve.multi_slot = false
+  serve.multi_slot_slots = 2
+  serve.multi_slot_ctx = 262144
+  serve.continuous_batch_size = 4
+  serve.vmm_batch = true
+  serve.batch_sampled = true
+  serve.batch_nonexact = false
+  memory.session_cache_bytes = 12884901888
+  hipfire_hipfire-init_1
+  hipfire_hipfire_1
+
+  == жду готовности (до 600с) ==
+  {"status":"ok","model":"qwen3.8:flash-next-mq4-xts",...}
+  HEALTHY после 20с
+
+  == смоук: 2 запроса ==
+  ответ: ок
+  ответ: ```python
+  print("hello world")
+  ```
+  SMOKE: OK
+  lanes: fn-lanes staged: topology=single lanes=4 row_budget=4 spec=mtp
+        → настоящий батчинг принят (запросы делят trunk-шаг)
+
+  == профиль flash-multi активен (конфиг автозапуска обновлён — переживёт рестарт) ==
+  container image: ghcr.io/warpfront/hipfire:0.4.7
+   "route": "lanes",
+   "image": "ghcr.io/warpfront/hipfire:0.4.7",
+  solo-code: 41.40 tok/s (бейзлайн 0.4.6: 75.8); route: lanes
+  AssertionError: route без dflash: 'lanes'
+  RESULT: FAIL — bench-проверки (см. вывод выше)
+
+Постпроверка оркестратора сразу после прогона:
+  /stats: uptime 265 c, requests_served 27 (наши smoke+bench ≈12), queue_depth: 2,
+  recent_tok_s: 51.0 → ОКНО НЕ ТИХОЕ: bench шёл под живым чужим трафиком
+  (урок contamin-прогона 11:50 на B — сравнение с бейзлайном 75.8 невалидно).
+
+RESULT: FAIL — прогон 1: (а) дефект EXP-скрипта: assert dflash неверен для
+flash-multi на B (штатный route=lanes, бейзлайн 75.8 снят на lanes);
+(б) окно не тихое, solo-code 41.4 неинтерпретируем. Шаги 1–3 (use→healthy 20 c,
+smoke 2/2, image=0.4.7) — PASS. Прогон 2 (тихий bench) — перенесён.
+
+──── прогон 2 (2026-11-16, та же сессия, только шаг 4: тихий bench) ────
+Тишина: попытки 1–5 queue 2→1, попытка 6: queue=0, чужих_за_30с=0.
+Bench (image ghcr.io/warpfront/hipfire:0.4.7, route lanes):
+  solo-code median 75.58 tok/s (бейзлайн 0.4.6: 75.8 → −0.3%, лимит 5%)
+  solo-prose median 23.98 tok/s; ttft median 155.0 мс
+Чистота замера: чужих_за_время_bench=0 (проверка после bench, 150 c).
+RESULT: PASS — 0.4.7: healthy/smoke (прогон 1) + тихий bench в пределах 5% от бейзлайна
