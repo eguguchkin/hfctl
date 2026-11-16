@@ -1,8 +1,9 @@
 # shellcheck shell=bash
-# ── файлы стека (официальные compose-файлы hipfire 0.4.6 — в tpl/compose/) ──
+# ── файлы стека (официальные compose-файлы hipfire 0.4.7 — в tpl/compose/) ──
 # Golden'ы tpl/compose сняты с апстрима 0.4.5; compose.yml/compose.halo.yml
-# в 0.4.6 байт-идентичны 0.4.5 (блобы совпали в git) — golden'ы валидны
-# и для 0.4.6 (recon 0.4.6, вопрос 10).
+# в 0.4.6 и 0.4.7 байт-идентичны 0.4.5 (блобы совпали в git; в 0.4.7:
+# git diff v0.4.6..v0.4.7 пуст, F-0.4.7.3) — golden'ы валидны и для
+# 0.4.6/0.4.7 (recon 0.4.6, вопрос 10).
 # Модуль не определяет глобалов; пишет через хелперы диспетчера (log/die),
 # читает SELF/STACK_DIR/TPL_DIR/MODELS_DIR/STATE_BASE/IMAGE/BIND/PORT/
 # DRAFT_FILE (диспетчер), cur_profile (lib/stack.sh), profile_field
@@ -147,8 +148,8 @@ write_stack_files() {
   sync_tree
   ensure_symlink
 
-  # compose.yml — дословно из репозитория hipfire 0.4.5 (для 0.4.6 байт-в-байт,
-  # блобы совпали в git; без monitoring-профилей:
+  # compose.yml — дословно из репозитория hipfire 0.4.5 (для 0.4.6 и 0.4.7
+  # байт-в-байт, блобы совпали в git; без monitoring-профилей:
   # они ссылаются на каталоги репо, которые hfctl не разворачивает).
   # СТАТИЧЕСКИЕ файлы: ${VAR:-def} внутри — переменные COMPOSE, не shell —
   # копировать целыми, без shell-экспансии/envsubst (графля brief №2).
