@@ -1,6 +1,56 @@
 # shellcheck shell=bash
 # ── автозапуск: юниты (render из tpl), on/off/up/down, boot-юнит, вотчдог ───
 
+# ── константы GPU-гейта (env-переопределение — только для shell-приёмок) ────
+KFD_NODE="${HFCTL_KFD:-/dev/kfd}"            # нода ROCm/NPU; env HFCTL_KFD — selfcheck
+DRI_GLOB="${HFCTL_DRI:-/dev/dri/renderD*}"   # глоб render-нод; env HFCTL_DRI — selfcheck
+GPU_WAIT_TIMEOUT=60  # сек ожидания GPU-нод перед первым up в _boot (gpu_ready_or_die)
+GPU_WAIT_INTERVAL=2  # интервал опроса GPU-нод в gpu_ready_or_die
+
+# Назначение: предикат «GPU-ноды на месте» — /dev/kfd И хотя бы одна renderD*;
+#   гейт перед любым compose up в _boot/_watchdog: ранний up при полупустом
+#   /dev/dri печатает в свежесозданный контейнер неполный device-снэпшот.
+#
+# Побочные эффекты: ничего не печатает и не меняет — только возвращаемый код.
+#
+# Ограничения/допущения: пути берёт из KFD_NODE/DRI_GLOB (верх файла; env
+#   HFCTL_KFD/HFCTL_DRI — приёмки selfcheck, в проде не переопределяются).
+#   compgen — builtin, внешних вызовов нет. У Halo card0 может не быть вовсе
+#   (нумерация с 1) — предикат намеренно НЕ смотрит card*.
+#
+# @returns integer # 0 — kfd есть и renderD* есть; 1 — иначе
+gpu_present() { [ -e "$KFD_NODE" ] && compgen -G "$DRI_GLOB" >/dev/null; }
+
+# Назначение: дождаться появления GPU-нод (gpu_present) перед первым compose
+#   up в _boot: цикл с интервалом GPU_WAIT_INTERVAL до GPU_WAIT_TIMEOUT секунд;
+#   по таймауту — die с диагностикой (kfd есть/нет + вывод ls /dev/dri) —
+#   юнит перезапустит _boot сам (Restart=on-failure), причина останется в
+#   journal вместо молчаливого цикла.
+#
+# Побочные эффекты: sleep GPU_WAIT_INTERVAL за итерацию ожидания; date +%s
+#   (дедлайн = старт + GPU_WAIT_TIMEOUT); чтение каталога /dev/dri (ls, для
+#   диагностики); при таймауте die() завершает весь процесс диспетчера (rc 1).
+#
+# Ограничения/допущения: требует gpu_present этого файла и die (диспетчер).
+#   Бюджет один и тот же для «ноды ещё не появились» и «не появились никогда»
+#   (60 с); amdgpu грузится за секунды, EFI-fb-заглушка даёт card* БЕЗ
+#   renderD* — гейт по renderD* её отсекает. Живой вызов один: cmd_boot
+#   перед циклом попыток up.
+#
+# @returns integer # 0 — ноды на месте; при таймауте не возвращается
+#   (die: exit 1)
+gpu_ready_or_die() {
+  local deadline dri
+  deadline=$(( $(date +%s) + GPU_WAIT_TIMEOUT ))
+  while ! gpu_present; do
+    if [ "$(date +%s)" -ge "$deadline" ]; then
+      dri=$(ls /dev/dri 2>/dev/null || true)
+      die "boot: GPU-ноды не появились за ${GPU_WAIT_TIMEOUT}с (kfd: $([ -e "$KFD_NODE" ] && echo есть || echo нет); /dev/dri: ${dri:-каталога нет или пуст}) — amdgpu не поднялся?"
+    fi
+    sleep "$GPU_WAIT_INTERVAL"
+  done
+}
+
 # Назначение: `hfctl up` (скрытый алиас): поднять стек, сняв явный маркер
 #   остановки, и дождаться готовности сервера.
 #
@@ -190,9 +240,10 @@ cmd_autostart() {
 # Ограничения/допущения: требует глобалы STACK_DIR (диспетчер), CF и
 #   compose (stack.sh). Гонка lock'а НЕ ошибка: «up уже выполняется —
 #   пропуск» и return 0 — boot/watchdog намеренно зовут конкурентно. rc
-#   compose up проходит наверх через pipefail (tail сам не падает). Живые
-#   вызовы этого файла: cmd_up (голый вызов под set -e), cmd_boot (в
-#   ветвлении if), cmd_watchdog (через `|| true`).
+#   compose up проходит наверх через pipefail (tail сам не падает). Живой
+#   вызов этого файла: cmd_up (cmd_on поднимает через cmd_up); boot-юнит и
+#   вотчдог подняты на hf_up_devsafe — им нужен не голый up, а лечение
+#   device-mismatch (рекон после ребута прод-машины (60 GiB) 2026-11-18).
 #
 # @stdout string   # «up уже выполняется — пропуск» при занятом lock'е либо
 #   последние 2 строки `compose up -d`
@@ -204,72 +255,100 @@ hf_up_locked() {
   ) 9>"$STACK_DIR/.hfctl.lock"
 }
 
+# Назначение: `compose up -d` под неблокирующим lock'ом с авто-лечением
+#   device-mismatch: podman запечатывает снэпшот /dev/dri в OCI-спеку при
+#   create, а нумерация карточек меняется между загрузками → старт СТАРОГО
+#   контейнера в новом буте падает «cannot stat …» / «Failed to create
+#   container», и обычный up никогда не лечится. Если после up контейнер
+#   проекта не running и вывод up содержит сигнатуру девайс-отказа —
+#   `podman rm -f` контейнеров проекта (лейбл io.podman.compose.project,
+#   имя от каталога стека ~/hipfire) и повторный up: свежий create
+#   запечатывает актуальную нумерацию. Максимум ДВЕ попытки up на вызов.
+#
+# Побочные эффекты: создание/усечение lock-файла $STACK_DIR/.hfctl.lock
+#   (неблокирующий flock, отпускается субшеллом); до двух `compose up -d`
+#   (в stdout — последние 2 строки вывода последнего); при сигнатуре —
+#   podman ps -aq --filter label=… и podman rm -f найденных контейнеров
+#   (вывод заглушён); два podman inspect статуса контейнера.
+#
+# Ограничения/допущения: требует глобалы STACK_DIR, CONTAINER (диспетчер),
+#   CF/compose (stack.sh). rc compose-вызовов заглушен (`|| true`): падение
+#   распознаётся по паре «статус ≠ running + сигнатура в выводе», не по rc —
+#   иные отказы up (pull, сеть) НЕ лечатся (rm не вызывается), хелпер
+#   возвращает 1, дальше решает вызывающий (цикл _boot / тихий уход
+#   вотчдога). Гонка lock'а — не ошибка: «пропуск» и 0 (как hf_up_locked).
+#   Лейбл проекта «hipfire» от каталога стека; если будущий podman-compose
+#   сменит лейбл, rm не найдёт целей и деградация равна прежнему поведению
+#   (юнит перезапустит _boot по rc 1). Не проверяет здоровье движка — только
+#   статус контейнера. Живые вызовы: cmd_boot (в цикле) и cmd_watchdog
+#   (через `|| true`) этого файла.
+#
+# @stdout string   # «up уже выполняется — пропуск» при занятом lock'е либо
+#   последние 2 строки последнего `compose up -d`
+# @returns integer # 0 — контейнер проекта running (сразу или после
+#   rm+повторного up); 1 — не running (отказ не девайсный либо retry не спас)
+hf_up_devsafe() {
+  ( flock -n 9 || { echo "up уже выполняется — пропуск"; return 0; }
+    local out
+    out=$(compose up -d 2>&1) || true
+    if [ -n "$out" ]; then printf '%s\n' "$out" | tail -2; fi
+    if [ "$(podman inspect -f '{{.State.Status}}' "$CONTAINER" 2>/dev/null)" != running ] \
+       && printf '%s' "$out" | grep -qE 'cannot stat|Failed to create container'; then
+      podman rm -f $(podman ps -aq --filter label=io.podman.compose.project=hipfire) >/dev/null 2>&1 || true
+      out=$(compose up -d 2>&1) || true
+      if [ -n "$out" ]; then printf '%s\n' "$out" | tail -2; fi
+    fi
+    [ "$(podman inspect -f '{{.State.Status}}' "$CONTAINER" 2>/dev/null)" = running ]
+  ) 9>"$STACK_DIR/.hfctl.lock"
+}
+
 # Назначение: внутренняя команда `_boot` загрузочного юнита
 #   hipfire-compose.service (ExecStart = /usr/bin/env bash
-#   $STACK_DIR/hfctl _boot): поднять стек при загрузке, когда GPU-ноды
-#   появляются позже юнит-менеджера юзера; если обычный `up -d` не поднимает
-#   контейнер со второй попытки — лечить перенумерацию /dev/dri
-#   пересозданием контейнера (пути устройств запечатаны в конфиге
-#   СУЩЕСТВУЮЩЕГО контейнера).
+#   $STACK_DIR/hfctl _boot): поднять стек при загрузке; перед первым up —
+#   дождаться GPU-нод (gpu_ready_or_die, die с диагностикой по таймауту);
+#   каждый up идёт через hf_up_devsafe — при девайс-отказе create/start
+#   («cannot stat», «Failed to create container») контейнер проекта
+#   удаляется и создаётся заново (запечатанный в OCI-спеке снэпшот /dev/dri
+#   обновляется до актуальной нумерации).
 #
-# Побочные эффекты: через hf_up_locked — lock-файл $STACK_DIR/.hfctl.lock
-#   (неблокирующий flock) и `compose up -d`; начиная со 2-й попытки при
-#   контейнере ≠ running — `compose up -d --force-recreate` под БЛОКИРУЮЩИМ
-#   flock с ожиданием (flock -w 120, до 2 мин поверх лока) — пересоздание
-#   контейнера с перезапечаткой путей устройств; podman inspect состояния
-#   контейнера; чтение /dev/dri/renderD* и /dev/kfd; date +%s (дедлайн);
-#   sleep 10 между попытками; по исчерпании бюджета — сообщение в stderr и
-#   rc 1 (юнит перезапускается самим systemd).
+# Побочные эффекты: gpu_ready_or_die — sleep по GPU_WAIT_INTERVAL, до 60 с,
+#   die по таймауту; в цикле — hf_up_devsafe (rc заглушен `|| true`,
+#   результат решает inspect ниже; lock-файл, до двух
+#   `compose up -d` и `podman rm -f` за итерацию — см. его контракт),
+#   podman inspect состояния контейнера; чтение KFD_NODE и DRI_GLOB,
+#   /dev/dri (ls в диагностике); date +%s (дедлайн); sleep 10 между
+#   попытками; по исчерпании бюджета — сообщение в stderr и rc 1 (юнит
+#   перезапускается самим systemd).
 #
 # Ограничения/допущения: вызывается только из systemd (ExecStart
 #   compose-юнита, рендерится из tpl/systemd/hipfire-compose.service.tpl),
-#   не пользовательская команда. Бюджет одного вызова: дедлайн
+#   не пользовательская команда. Бюджет: gpu_ready_or_die ≤ 60 с + цикл
 #   deadline = старт + 420 с (локал deadline — целые unix-секунды
 #   `date +%s`), проверка в начале каждой попытки; потолок 48 попыток
-#   (локал i — номер из seq 1 48) — страховка от стоящих часов при живом
-#   дедлайне (42 попытки по 10 с в него влезают, потолок не наступает
-#   раньше). Хвост: попытка, начатая до дедлайна, добавляет ≤ flock -w 120
-#   + два compose-вызова + sleep 10 без зависаний ≈ 3 мин → итог ~10 мин,
-#   в пределах TimeoutStartSec=900 юнита (внешняя крышка systemd для
-#   зависшего compose). Recreate со 2-й попытки, далее каждой: запечатанный
-#   путь устройства обычный `up -d` не лечит никогда, ждать три цикла (как
-#   было) — терять минуты простоя после каждой перенумерации. flock
-#   блокирующий (-w, не -n): вотчдог (таймер 1 мин, hf_up_locked) держит
-#   тот же lock и поднимает обычным `up -d` именно мёртвый контейнер —
-#   при -n recreate голодал этим конкурентом (приёмка на прод-машине
-#   (60 GiB): после ребута простой до ручного force-recreate); -w ждёт
-#   чужой compose-вызов, но параллельного recreate не допускает
-#   (взаимоисключение сохранено). Гейт нод — renderD* + /dev/kfd (у Halo
-#   card0 может не быть вовсе — нумерация с 1, AGENTS-грабля 5). rc=1 для
-#   юнита — штатный сигнал неудачи (Restart=on-failure, RestartSec=30).
-#   Требует глобалы CONTAINER, STACK_DIR (диспетчер), CF и compose
-#   (stack.sh), hf_up_locked этого файла.
+#   (локал i — номер из seq 1 48) — страховка от стоящих часов; хвост
+#   попытки, начатой до дедлайна: два compose-вызова + rm + sleep 10 ≈
+#   ≤2–3 мин → итог ≤ ~10 мин, в пределах TimeoutStartSec=900 юнита
+#   (внешняя крышка systemd для зависшего compose). Гейт нод повторяется
+#   в начале каждой попытки (gpu_present): EFI-fb-заглушка даёт card*
+#   БЕЗ renderD* — гейт по renderD*+kfd отсекает её; у Halo card0 может
+#   не быть вовсе (нумерация с 1, AGENTS-грабля 5). rc=1 для юнита —
+#   штатный сигнал неудачи (Restart=on-failure, RestartSec=30). Требует
+#   глобалы CONTAINER, STACK_DIR (диспетчер), CF/compose (stack.sh),
+#   gpu_present/gpu_ready_or_die/hf_up_devsafe этого файла.
 #
 # @returns integer # 0 — контейнер в состоянии running; 1 — бюджет ~7 мин
 #   исчерпан (сообщение в stderr; systemd перезапустит юнит)
 cmd_boot() {
   local i deadline
-  # бюджет одного вызова _boot: 420 с цикла + хвост ≤ ~3 мин < TimeoutStartSec=900
+  gpu_ready_or_die
+  # бюджет цикла: 420 с + хвост ≤ ~3 мин, плюс ≤60 с GPU-wait < TimeoutStartSec=900
   deadline=$(( $(date +%s) + 420 ))
   for i in $(seq 1 48); do
     [ "$(date +%s)" -ge "$deadline" ] && break
-    # ядро ROCm — renderD*; у Halo может не быть card0 вообще (нумерация с 1)
-    if ! compgen -G "/dev/dri/renderD*" >/dev/null || [ ! -e /dev/kfd ]; then sleep 10; continue; fi
-    if hf_up_locked; then :; fi
+    if ! gpu_present; then sleep 10; continue; fi
+    hf_up_devsafe || true
     if [ "$(podman inspect -f '{{.State.Status}}' "$CONTAINER" 2>/dev/null)" = running ]; then
       return 0
-    fi
-    # не поднялся со 2-й попытки: номера /dev/dri сменились между загрузками,
-    # а путь запечатан в конфиге СУЩЕСТВУЮЩЕГО контейнера — обычный `up -d`
-    # его не лечит никогда; recreate под БЛОКИРУЮЩИМ flock (-w 120: вотчдог
-    # с тем же lock'ом не вытесняет recreate насовсем, но и параллельного
-    # recreate не получается).
-    # shortcut: перенумерация /dev/dri лечится только в boot-цикле (вотчдог
-    # в аптайме recreate не делает — там пути уже запечатаны корректно);
-    # апгрейд — когда движок/compose станут разрешать устройства по имени,
-    # а не запечатывать путь в конфиг контейнера.
-    if [ "$i" -ge 2 ]; then
-      ( flock -w 120 9 && compose up -d --force-recreate 2>&1 | tail -1 ) 9>"$STACK_DIR/.hfctl.lock" || true
     fi
     sleep 10
   done
@@ -280,31 +359,42 @@ cmd_boot() {
 # Назначение: внутренняя команда `_watchdog` вотчдог-таймера
 #   (hipfire-compose-watchdog.service, OnUnitActiveSec=1min, ExecStart =
 #   bash $STACK_DIR/hfctl _watchdog): если контейнер не running и стек не
-#   остановлен ЯВНО — поднять его.
+#   остановлен ЯВНО — поднять его; поднятие идёт через hf_up_devsafe (тот
+#   же класс защиты, что у boot-юнита: девайс-отказ create/start лечится
+#   rm+повторным up на месте — вотчдог больше не упирается в мёртвый
+#   контейнер с запечатанной старой нумерацией /dev/dri до следующего
+#   ребута).
 #
-# Побочные эффекты: чтение маркера $STACK_DIR/.hfctl-stopped и состояния
-#   контейнера (podman inspect); при необходимости — дописывание строки с
-#   ISO-временем в $STACK_DIR/.hfctl-watchdog.log (stderr заглушён, сбой
-#   дописи глушится `|| true`) и hf_up_locked (lock-файл + `compose up -d`,
-#   rc заглушён `|| true`).
+# Побочные эффекты: чтение маркера $STACK_DIR/.hfctl-stopped, состояния
+#   контейнера (podman inspect) и GPU-нод (gpu_present); при неготовом GPU —
+#   тихий немедленный выход (ранний тик таймера после boot: up при
+#   полупустом /dev/dri запечатал бы неполный снэпшот в свежий контейнер);
+#   при необходимости — дописывание строки с ISO-временем в
+#   $STACK_DIR/.hfctl-watchdog.log (stderr заглушён, сбой дописи глушится
+#   `|| true`) и hf_up_devsafe (lock-файл + до двух compose up + возможный
+#   rm, rc заглушён `|| true`).
 #
 # Ограничения/допущения: вызывается только из systemd, не для ручного
 #   запуска. Маркер на месте — немедленный return 0 без побочных эффектов
-#   (явный `hfctl down`/`off` глушит вотчдог). Локал st — состояние
-#   podman (`running`/`exited`/`created`/`paused`…) либо `missing` —
-#   fallback-заглушка `|| echo missing` при недоступном inspect; любой
-#   st ≠ running считается падением. Требует глобалы CONTAINER, STOP_MARKER,
-#   STACK_DIR (диспетчер), CF/compose (stack.sh) и hf_up_locked этого
-#   файла.
+#   (явный `hfctl down`/`off` глушит вотчдог); гейт GPU — вторым (маркер
+#   старше: явная остановка уважается даже без GPU). Тихий отказ тика при
+#   неготовом GPU выбран вместо короткого ожидания: вотчдог минутный, он
+#   просто вернётся через минуту, а бюджет тика остаётся секундным.
+#   Локал st — состояние podman (`running`/`exited`/`created`/`paused`…)
+#   либо `missing` — fallback-заглушка `|| echo missing` при недоступном
+#   inspect; любой st ≠ running считается падением. Требует глобалы
+#   CONTAINER, STOP_MARKER, STACK_DIR (диспетчер), CF/compose (stack.sh) и
+#   gpu_present/hf_up_devsafe этого файла.
 #
 # @returns integer # всегда 0 — все отказные rc заглушены (`|| true`,
-#   `[ -f … ] &&`), здоровый контейнер тоже даёт 0
+#   `[ … ] &&`), здоровый контейнер и неготовый GPU тоже дают 0
 cmd_watchdog() {
   [ -f "$STOP_MARKER" ] && return 0
+  gpu_present || return 0
   local st
   st=$(podman inspect -f '{{.State.Status}}' "$CONTAINER" 2>/dev/null || echo missing)
   if [ "$st" != running ]; then
     echo "$(date -Is) watchdog: container state=$st -> up" >> "$STACK_DIR/.hfctl-watchdog.log" 2>/dev/null || true
-    hf_up_locked || true
+    hf_up_devsafe || true
   fi
 }
