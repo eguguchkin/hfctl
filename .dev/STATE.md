@@ -271,3 +271,15 @@
   decode 130.9/τ13.18 vs эталон 131.0/13.18 — паритет. Драфтер-гипотеза
   пользователя снята (draft-файл один и тот же). Обе машины на 0.4.7,
   автозапуск обновлён. Хвост: install.sh-доставка бинаря при окнах.
+- **Долг-инцидент 2026-11-21 (evo, прод вниз ~5 ч):** рассинхрон libpod-БД
+  и storage-слоя podman → compose up вечный цикл «name in use by an
+  external entity»; битый pod с пустым INFRA ID; SIGKILL-выжившие держатели
+  `.hfctl.lock` голодали рестарты юнита. Полный разбор — llm-lab
+  `.dev/GOTCHAS.md` «compose up виснет навечно…». Фиксы hfctl (backlog):
+  (1) up/_boot распознаёт «already in use by an external entity» → rm
+  контейнера-сироты по ID из текста ошибки; (2) вотчдог/_boot перед flock
+  детектят и убивают зависших держателей лока; (3) _boot валидирует INFRA
+  ID pod'а проекта, пересоздаёт битый pod; (4) `cmd_off` — явный
+  `podman stop <контейнер>` после compose stop (rootless netns баг делает
+  compose stop молчаливо неполным; «hfctl off» говорил «остановлен» при
+  живом контейнере — факт окна 2026-11-21, FAEX live-воспроизведение).
