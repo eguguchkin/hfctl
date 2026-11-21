@@ -444,3 +444,35 @@ compose.yml/compose.halo.yml байт-идентичны 0.4.5/0.4.6 (F-0.4.7.3)
 - [ ] SPEC: раздел «Инварианты поставки» уже записан (2026-11-21); сверка
       §3/§14 с новой реализацией
 - [ ] Живой приём: чистая машина/ребут (EXP-хвост, вне подэтапа)
+
+## Этап 14 — лейаут v2 (идеология gfctl): репо = стек, без фазы install (ПОСЛЕ АПРУВА)
+
+Источник принципа: gfctl `.dev/tasks/4/4.4-layout-python-decision.md` (РЕШЕНО 2026-11-19/20)
+и живая эксплуатация обеих машин gfctl. Суть: одна папка = git-клон = STACK_DIR = запуск;
+все состояние внутри `.data/` (вне git); явная фаза install упраздняется.
+
+Целевое для hfctl (соответствие gfctl-принципу):
+- [ ] `~/hfctl/` = git-клон = STACK_DIR = место запуска (`./hfctl` из корня;
+      STACK_DIR = dirname gfctl-файла, не cwd — уже так)
+- [ ] состояние машины внутрь клона: `.data/{profiles,cache,logs}` + `.env`
+      (gitignore; сегодня .env/profiles пишутся в ~/hipfire-стек)
+- [ ] install.sh УПРАЗДНЯЕТСЯ; bootstrap — первый `hfctl on`: preflight
+      (apt: podman/podman-compose/containers-storage/psmisc/curl + GPU-prep
+      из 13.2) → конфиг-профиль → юниты → контейнер → health → smoke
+- [ ] uninstall v2-семантика: юниты/контейнер/linger/limits.d снимаются;
+      `.data/` и образ НЕ удаляются (полный снос руками)
+- [ ] `git clean -fd` безопасен (.data/ в .gitignore), `-fdx` запрещён
+      (README warning); «одна инсталляция на пользователя» — документировать
+- [ ] И1 (SPEC «Инварианты поставки») переформулировать: hfctl = первый
+      `hfctl on` (не ./install.sh) — в той же дельте
+- [ ] Миграция машин FAEX/evo: ~/hipfire-стек → ~/hfctl-клон + mv состояния
+      (models/profiles/.env → .data/, иноды сохраняются) → off→on → healthy
+      (по прецеденту миграции gfctl); после — И3 автоматичен (стек=клон)
+- [ ] Открытые вопросы к architect-раунду: имя/поведение `hfctl install`
+      (алиас on? удалить?), models-path дефолт, .hfctl-containers.conf
+      (Ф5) — место в .data или корень+gitignore, bench-runs/ (данные — в
+      .data/), конфликт второго клона (документировать)
+- [ ] Батарея: happy-path bootstrap первого on на faux; uninstall v2-ассерты
+
+Последовательность: 13.2 (host-preflight GPU) — ПЕРЕД 14 (preflight-логика
+переживёт реструктур); 14 — отдельным циклом после апрува пользователя.
