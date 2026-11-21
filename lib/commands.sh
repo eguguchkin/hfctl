@@ -7,9 +7,11 @@
 #   Идемпотентен (повтор = донастройка поверх существующего).
 #
 # Побочные эффекты (по фазам):
-#   Хост (preflight, sudo точечно): apt podman/podman-compose/curl,
-#     usermod -aG render, limits.d memlock-файл, enable-linger; exit 42 при
-#     свежей группе/лимитах (нужен перезаход/ребут).
+#   Хост (preflight, sudo точечно): apt-пятёрка podman/podman-compose/
+#     containers-storage/psmisc/curl одним need-списком, usermod -aG
+#     render,video, limits.d memlock-файл из tpl/etc, enable-linger;
+#     не-GPU машина — info-пропуск GPU-шага; exit 42 при свежих группах/
+#     лимитах (нужен перезаход/ребут).
 #   Файлы: write_stack_files — дерево hfctl (бинарь+lib/+tpl/) в $STACK_DIR,
 #     симлинк ~/.local/bin/hfctl, compose-тройка + compose.local.yml;
 #     write_env — ПЕРЕЗАПИСЬ .env канона профиля.

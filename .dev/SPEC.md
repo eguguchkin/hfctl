@@ -47,7 +47,7 @@ hfctl install             # preflight → модели → конфиг → ст
   явные bind-маунты вместо named volumes; disk-тир кэша —
   `profiles/<профиль>/config/session-cache/`), compose-файлы, `.env`, логи).
   Вне каталога: systemd-user юниты, образ ghcr, podman network,
-  `limits.d/99-<user>-memlock.conf`, группа render, linger.
+  `limits.d/99-hipfire-memlock.conf` (рендер tpl/etc), группы render,video, linger.
 
 ## 3 · Карта команд
 
@@ -389,10 +389,12 @@ gfctl on; hfctl off`) плюс фиксированные диагностиче
 последовательностью. (Родилось из окна 2026-11-21: прод evo «подняли»
 руками 3 часа — по И2 это был FAIL, дефекты которого и стали этапом 13.1.)
 
-Соответствие hfctl на 2026-11-21: И1 — частично (podman/podman-compose/curl
-автоматом; юниты/linger; 13.1 самолечение) — **гэпы: GPU-подготовка,
-containers-storage+psmisc в preflight → этап 13.2**; И2 — выполнен для 4
-известных аномалий (13.1), поддерживается правилом выше для будущих.
+Соответствие hfctl на 2026-11-21: И1 — закрыт кодом 13.2 (apt-пятёрка одним
+need-списком; GPU-подготовка — гейт /dev/kfd|/dev/dri, группы render,video,
+limits.d из tpl/etc, честный вывод «перелогин/ребут», info-пропуск на
+не-GPU; юниты/linger; 13.1 самолечение) — живой приём: EXP-хвост деплой-окна
+(чистая машина + FAEX/evo = no-op); И2 — выполнен для 4 известных аномалий
+(13.1), поддерживается правилом выше для будущих.
 
 **И3 — «деплой и прогоны на машину всегда из GitHub».** Код на машину
 попадает только через GitHub: клон репо на машине → `git pull` → синк
@@ -401,11 +403,38 @@ containers-storage+psmisc в preflight → этап 13.2**; И2 — выполн
 GitHub-производного кода на машине. (2026-11-21:~/hfctl клон создан на
 FAEX/evo; стек FAEX пересинкнут из клона.)
 
-## 13.2 (план): host-preflight GPU + containers-storage/psmisc в apt-строке
+## 13.2: host-preflight — apt-пятёрка + GPU-подготовка хоста (2026-11-21)
 
-preflight install-пути: (а) `containers-storage` и `psmisc` — в apt-строку
-рядом с podman (закрывает Variant-B дыру 13.1: сегодня только WARN);
-(б) GPU-подготовка: usermod -aG render,video (idempotent), limits.d memlock
-(idempotent, файл из tpl/etc), гейт по наличию /dev/kfd|/dev/dri, честный
-вывод «нужен перелогин». Батарея: faux id/usermod/limits по прецеденту §18
-gfctl. Живой приём — следующая чистая машина/ребут (EXP-хвост).
+preflight живёт на install-пути (`cmd_install`/`cmd_use`; `hfctl on` preflight
+не зовёт — переподключение в bootstrap отдельным циклом, этап 14). GPU-шаг
+вынесен в самодостаточную функцию `gpu_prep` (lib/stack.sh) — единица
+переезда. Новый порядок: root → os-release → gpu_prep → железный гейт §6.3
+(`/dev/kfd` нет → die, текст прежний, путь через хук) → RAM-warn → apt →
+linger.
+
+- **apt-пятёрка одним need-списком**: podman, podman-compose,
+  containers-storage, psmisc (fuser — реклейм лока 13.1), curl. Непустой
+  список → ровно один `sudo apt-get update -qq && sudo apt-get install -y
+  -qq <список>`; всё на месте — apt не вызывается вовсе (прежние два блока
+  заменены одним).
+- **gpu_prep — гейт**: применение только при наличии `/dev/kfd` ИЛИ
+  `/dev/dri` (env-крючки `HFCTL_KFD`/`HFCTL_DRI` — selfcheck, прод не
+  переопределяет); иначе info-строка «GPU-подготовка пропущена» и НОЛЬ
+  мутаций (die §6.3 в preflight следует за пропуском).
+- **gpu_prep — группы**: `usermod -aG render,video` только когда какой-то из
+  групп нет в `id -nG`; при фактическом добавлении — честный warn «перезаход»
+  + exit 42 (механизм §9). Обе группы есть → no-op без sudo.
+- **gpu_prep — limits.d**: `/etc/security/limits.d/99-hipfire-memlock.conf`
+  рендерится из `tpl/etc/99-hipfire-memlock.conf.tpl` (`__USER__`/
+  `__MEMLOCK__`, render_tpl) и пишется `sudo install -m 0644` — только если
+  файла нет ИЛИ содержимое отличается (cmp); сразу после записи при низком
+  `ulimit -Hl` — прежний warn «ребут» + exit 42. Рендер байт-в-байт равен
+  прежним двум строкам — на прод-машинах перезаписи нет. Хук
+  `HFCTL_LIMITS` (путь файла) — selfcheck-only; doctor/uninstall хардкодят
+  фактическое имя.
+- **Батарея**: P-A…P-H (faux id/usermod/loginctl/sudo-install, PATH-наборы
+  stripped/FAUX_FULL, настоящий ulimit в P-G) + мутации по маркерам
+  `# fix:`: preflight-pkgs (2), gpu-gate/gpu-groups/gpu-limits (по 1).
+- §14 не противоречит: WARN-канал отсутствия containers-storage (Variant B)
+  остаётся для старых машин — после обновления бинаря preflight ставит
+  пакет сам. Живой приём — EXP-хвост деплой-окна.

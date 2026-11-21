@@ -157,3 +157,13 @@
   регэкса=деградация, голый ребут без conf-файла=прежнее поведение). Ф1–Ф5: off-stop,
   orphan-heal, lock-reclaim, pod-infra-валидация, CONTAINERS_CONF-скоуп slirp4netns
   (EXP-012/013 llm-lab). EXP-хвост деплой-окна: живые Ф1–Ф5 + скорость pull под slirp.
+- **Этап 13.2 host-preflight — APPROVED (2026-11-21), цикл полный**: architect task.md
+  (точки входы по живому коду: preflight = install-путь cmd_install/cmd_use; GPU-шаг
+  самодостаточной gpu_prep — переживает переезд bootstrap этапа 14; apt-пятёрка одним
+  need-списком; limits.d из tpl/etc байт-паритет; §6.3-die после gpu_prep) → developer
+  (PASS=40/0, 4 мутации, адаптации песочницы: unshare -rm + HF_MEMLOCK-хук) → tester
+  PASS (счётчик 28→40 цел; мутации 4/4 ×2 направления; P-H no-op = эмуляция FAEX/evo;
+  находка non-blocking: дофиксовый баг bash -n мультифайлов в гарде мутаций — бэклог
+  тестов) → reviewer APPROVED (риски: cmp-перезапись рукописного limits каноном —
+  поведение не меняется; exit 42 — rc доходит наверх; unshare только в батарее).
+  EXP-хвост деплой-окна: no-op на FAEX/evo, чистая машина, cat limits до/после.

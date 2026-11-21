@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # run_checks.sh — internal-check батарея сабстэджа 13.1 (самолечение аномалий,
-# фиксы Ф1–Ф5) + AGENTS-четыре. Прецеденты: gfctl tests/run_checks.sh (faux-bin
+# фиксы Ф1–Ф5) + 13.2 (preflight: apt-пятёрка + GPU-подготовка, P-A…P-H) +
+# AGENTS-четыре. Прецеденты: gfctl tests/run_checks.sh (faux-bin
 # PATH-заглушки с журналом вызовов, harness-субшелл «глобалы диспетчера +
 # source lib + faux-PATH + eval») и .dev/tasks/defects/boot-device-mismatch/
 # selfcheck.sh (GPU-гейт через env-крючки шапки autostart.sh).
@@ -19,12 +20,28 @@
 #   форму утилитового; python держит настоящий flock на lock-файле).
 #
 # Ограничения/допущения: bash + python3 в PATH; /dev/kfd и /dev/dri здесь не
-#   нужны (up-пути батареи зовутся напрямую, GPU-гейт только в _boot).
+#   нужны (up-пути батареи зовутся напрямую, GPU-гейт только в _boot; P-сценарии
+#   13.2 хукают их через HFCTL_KFD/HFCTL_DRI). Среда песочницы — Alpine, а
+#   preflight требует ubuntu|debian из /etc/os-release: батарея (кроме
+#   AGENTS-четырёх на реальном пути) перезапускает себя под `unshare -rm` с
+#   bind-подменой /etc/os-release на фейк ID=ubuntu — только внутри своего
+#   namespace, реальный /etc не трогается; если userns недоступен, батарея
+#   идёт без подмены и P-сценарии честно падают на os-чеке.
 #   Запуск из любого каталога. exit-код = вердикт.
 set -u
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+# ре-exec под user+mount namespace (см. Ограничения): до создания $TMP, без хвостов
+if [ "${HF_CHECKS_UNSHARED:-0}" != 1 ] && command -v unshare >/dev/null 2>&1 \
+   && command -v mount >/dev/null 2>&1 && unshare -rm true 2>/dev/null; then
+  exec unshare -rm env HF_CHECKS_UNSHARED=1 bash "$0" "$@"
+fi
 TMP="$(mktemp -d "${TMPDIR:-/tmp}/hfctl-checks.XXXXXX")" || { echo "run_checks: mktemp недоступен" >&2; exit 1; }
 trap '[ -n "${TMP:-}" ] && rm -rf "$TMP"' EXIT
+# подмена /etc/os-release внутри namespace (продукт читает абсолютный путь)
+if [ "${HF_CHECKS_UNSHARED:-0}" = 1 ]; then
+  printf 'ID=ubuntu\nVERSION_ID="24.04"\n' > "$TMP/fake-os-release"
+  mount -o bind "$TMP/fake-os-release" /etc/os-release 2>/dev/null || true
+fi
 PASS=0 FAIL=0
 ok()  { PASS=$((PASS + 1)); printf 'PASS: %s\n' "$*"; }
 bad() { FAIL=$((FAIL + 1)); printf 'FAIL: %s\n' "$*"; }
@@ -122,14 +139,76 @@ cat > "$FAUX/containers-storage" <<'EOF'
 [ "${HFCTL_FAUX_CS_FAIL:-0}" = 1 ] && exit 1
 exit 0
 EOF
-for b in systemctl loginctl sudo; do
+for b in systemctl; do
 cat > "$FAUX/$b" <<EOF
 #!/usr/bin/env bash
 { printf '$b'; printf ' %s' "\$@"; printf '\n'; } >> "\${HFCTL_FAUX_LOG:?}"
 exit 0
 EOF
 done
+# loginctl: 13.2 — при HFCTL_FAUX_LINGER=1 печатает Linger=yes (ветка «linger
+#   уже включён»), иначе пусто (ветка enable-linger preflight)
+cat > "$FAUX/loginctl" <<'EOF'
+#!/usr/bin/env bash
+{ printf 'loginctl'; printf ' %s' "$@"; printf '\n'; } >> "${HFCTL_FAUX_LOG:?}"
+[ "${HFCTL_FAUX_LINGER:-0}" = 1 ] && printf 'Linger=yes\n'
+exit 0
+EOF
+# sudo: журнал + rc 0; форма install -m 0644 SRC DST — дополнительно РЕАЛЬНАЯ
+#   копия install'ом в цель, только когда DST внутри $TMP (limits-ассерты P-E/P-F;
+#   настоящих sudo-мутаций нет — HFCTL_LIMITS всегда хукается в $TMP)
+cat > "$FAUX/sudo" <<'EOF'
+#!/usr/bin/env bash
+{ printf 'sudo'; printf ' %s' "$@"; printf '\n'; } >> "${HFCTL_FAUX_LOG:?}"
+if [ "${1:-}" = install ] && [ "${2:-}" = -m ] && [ "${3:-}" = 0644 ]; then
+  case "${5:-}" in "${HFCTL_FAUX_TMP:?}"/*) install -m 0644 "$4" "$5" ;; esac
+fi
+exit 0
+EOF
+# id/usermod: 13.2 — id -u → 1000 (root-чек preflight), id -nG → HFCTL_FAUX_GROUPS
+#   (дефолт tester render video); usermod — журнал, rc 0
+cat > "$FAUX/id" <<'EOF'
+#!/usr/bin/env bash
+case "${1:-}" in
+  -u)  echo 1000 ;;
+  -nG) echo "${HFCTL_FAUX_GROUPS:-tester render video}" ;;
+  *)   echo "uid=1000(tester) gid=1000(tester)" ;;
+esac
+EOF
+cat > "$FAUX/usermod" <<'EOF'
+#!/usr/bin/env bash
+{ printf 'usermod'; printf ' %s' "$@"; printf '\n'; } >> "${HFCTL_FAUX_LOG:?}"
+exit 0
+EOF
 chmod +x "$FAUX"/*
+# FAUX_FULL: FAUX + faux podman-compose/fuser/curl — P-сценарии «всё на месте»
+#   (podman-compose в контейнере реально отсутствует, fuser/curl здесь — faux
+#   для детерминизма; на Ф3 не влияет: там используется $FAUX или $NOFU)
+FAUX_FULL="$TMP/faux-full"; mkdir -p "$FAUX_FULL"
+for b in "$FAUX"/*; do ln -sf "$b" "$FAUX_FULL/$(basename "$b")"; done
+cat > "$FAUX_FULL/podman-compose" <<'EOF'
+#!/usr/bin/env bash
+{ printf 'podman-compose'; printf ' %s' "$@"; printf '\n'; } >> "${HFCTL_FAUX_LOG:?}"
+exit 0
+EOF
+for b in fuser curl; do
+cat > "$FAUX_FULL/$b" <<EOF
+#!/usr/bin/env bash
+{ printf '$b'; printf ' %s' "\$@"; printf '\n'; } >> "\${HFCTL_FAUX_LOG:?}"
+exit 0
+EOF
+done
+chmod +x "$FAUX_FULL"/*
+# STRIPPED: базовые утилиты + mktemp/cmp/install БЕЗ podman/podman-compose/
+#   containers-storage/fuser/curl — P-A «всё отсутствует» (apt-пятёрка целиком);
+#   faux id/loginctl/sudo/usermod — журналирующие заглушки 13.2
+STRIPPED="$TMP/faux-stripped"; mkdir -p "$STRIPPED"
+for b in bash python3 flock ps tail grep awk sed head cat cut date sleep touch mkdir rm ls env mktemp cmp install; do
+  src=$(command -v "$b" 2>/dev/null) && ln -sf "$src" "$STRIPPED/$b"
+done
+for b in id usermod loginctl sudo; do ln -sf "$FAUX/$b" "$STRIPPED/$b"; done
+# существующие пути-цели для HFCTL_KFD/HFCTL_DRI (гейт gpu_prep: [ -e ])
+: > "$TMP/kfd-node"; : > "$TMP/dri-node"
 # FAUX_NS: то же БЕЗ containers-storage (сценарий «бинаря нет», Variant B;
 # настоящий containers-storage в контейнере отсутствует — проверено эмпирически)
 FAUX_NS="$TMP/faux-nostor"; mkdir -p "$FAUX_NS"
@@ -151,10 +230,10 @@ hf() {  # hf <bash-код> — stdout+stderr и rc наружу
     set -euo pipefail
     export PATH="${HF_PATH:-$FAUX:$PATH}"
     export HFCTL_FAUX_LOG="$FAUXLOG" HFCTL_FAUX_CNT="$FAUXCNT" HFCTL_FAUX_ORPHAN_ID="$ORPHAN_ID"
-    export HOME="$TMP/home" USER="tester"
+    export HOME="$TMP/home" USER="tester" HFCTL_FAUX_TMP="$TMP"
     IMAGE="ghcr.io/warpfront/hipfire:0.4.7"
     STACK_DIR="$HF_STACK" MODELS_BASE="$HF_STACK/models" MODELS_DIR="$HF_STACK/models/27b"
-    STATE_BASE="$HF_STACK/profiles" PORT=11435 BIND="0.0.0.0" SLOTS=2 MAX_SEQ=262144 MEMLOCK=1318060032
+    STATE_BASE="$HF_STACK/profiles" PORT=11435 BIND="0.0.0.0" SLOTS=2 MAX_SEQ=262144 MEMLOCK="${HF_MEMLOCK:-1318060032}"
     DRAFT_FILE="/home/hipfire/.hipfire/models/qwen38-27b-dflash-mq4.hfq"
     STOP_MARKER="$HF_STACK/.hfctl-stopped"
     CONTAINER="hipfire_hipfire_1" UNIT_NAME="hipfire-compose"
@@ -194,6 +273,10 @@ spawn_holder() {  # spawn_holder <lock-path> — печатает pid holder'а
 lock_is_held() {  # lock_is_held <lock-path> — 0, если flock -n не может взять
   ( flock -n 9 ) 9>"$1" 2>/dev/null
   [ $? -ne 0 ]
+}
+
+limits_bytes() {  # limits_bytes <user> <memlock> — ожидаемые байты limits-файла
+  printf '%s soft memlock %s\n%s hard memlock %s\n' "$1" "$2" "$1" "$2"
 }
 
 # ── сценарии позитивов (return 0 = все ассерты держатся) ─────────────────────
@@ -368,10 +451,131 @@ scen_f5_env() {
   return 0
 }
 
-# инвентарь маркеров: 5 имён на месте, счёт по локациям верный
+# ── 13.2: preflight — apt-пятёрка + GPU-подготовка (гейт/группы/limits.d) ────
+# Хуки: HFCTL_KFD/HFCTL_DRI (существующие/несуществующие пути), HFCTL_LIMITS
+#   (всегда в $TMP), HFCTL_FAUX_GROUPS (группы юзера), HFCTL_FAUX_LINGER,
+#   HF_MEMLOCK (лимит сессии: хард песочницы 4097452 не поднимается —
+#   «достаточная сессия» эмулируется MEMLOCK=2097152 ≤ 4097452).
+
+# P-A pkgs-missing: stripped PATH (всё пятеро нет), GPU есть, группы ок,
+# limits заранее равен рендеру → ровно один apt install с пятью именами,
+# update перед ним, rc 0
+scen_p_a() {
+  new_stack pa; fresh_log
+  local lim="$TMP/limits-pa.conf" rc n_upd n_inst
+  limits_bytes tester 1318060032 > "$lim"
+  HFCTL_LIMITS="$lim" HFCTL_KFD="$TMP/kfd-node" HFCTL_DRI="$TMP/dri-node" \
+    HF_PATH="$STRIPPED" hf 'preflight' >/dev/null 2>&1; rc=$?
+  n_inst=$(grep -c 'apt-get install -y -qq podman podman-compose containers-storage psmisc curl' "$FAUXLOG" || true)
+  n_upd=$(grep -n 'apt-get update -qq' "$FAUXLOG" | head -1 | cut -d: -f1)
+  local n_ln; n_ln=$(grep -n 'apt-get install -y -qq podman' "$FAUXLOG" | head -1 | cut -d: -f1)
+  [ "${n_inst:-0}" = 1 ] && [ -n "$n_upd" ] && [ -n "$n_ln" ] \
+    && [ "$n_upd" -lt "$n_ln" ] && [ "$rc" = 0 ]
+}
+
+# P-B pkgs-present: FAUX_FULL (все пять есть) → rc 0, apt-get в журнале 0 раз
+scen_p_b() {
+  new_stack pb; fresh_log
+  local lim="$TMP/limits-pb.conf" rc n_apt
+  limits_bytes tester 1318060032 > "$lim"
+  HFCTL_LIMITS="$lim" HFCTL_KFD="$TMP/kfd-node" HFCTL_DRI="$TMP/dri-node" \
+    HF_PATH="$FAUX_FULL:$PATH" hf 'preflight' >/dev/null 2>&1; rc=$?
+  n_apt=$(grep -c 'apt-get' "$FAUXLOG" || true)
+  [ "$rc" = 0 ] && [ "${n_apt:-0}" = 0 ]
+}
+
+# P-C не-GPU: хуки → несуществующие пути → info-пропуск, затем §6.3-die;
+# ноль мутаций (usermod/install-limits/enable-linger/apt в журнале НЕТ)
+scen_p_c() {
+  new_stack pc; fresh_log
+  local out rc
+  out=$(HFCTL_KFD="$TMP/no-kfd" HFCTL_DRI="$TMP/no-dri" hf 'preflight' 2>&1); rc=$?
+  printf '%s' "$out" | grep -q 'GPU-подготовка пропущена' \
+    && printf '%s' "$out" | grep -q '/dev/kfd нет' \
+    && [ "$rc" != 0 ] \
+    && ! grep -qE 'usermod|install -m 0644|enable-linger|apt-get' "$FAUXLOG"
+}
+
+# P-D группы свежие: kfd есть, video нет в id -nG → usermod render,video в
+# журнале, честный вывод «после перезахода», rc 42; limits/linger/apt не достигнуты
+scen_p_d() {
+  new_stack pd; fresh_log
+  local out rc
+  out=$(HFCTL_FAUX_GROUPS="tester render" HFCTL_KFD="$TMP/kfd-node" \
+    HFCTL_DRI="$TMP/dri-node" hf 'preflight' 2>&1); rc=$?
+  grep -qF 'sudo usermod -aG render,video tester' "$FAUXLOG" \
+    && printf '%s' "$out" | grep -q 'после перезахода' \
+    && [ "$rc" = 42 ] \
+    && ! grep -qE 'install -m 0644|enable-linger|apt-get' "$FAUXLOG"
+}
+
+# P-E limits-файла нет: создан, байты == рендер (tester/2097152), сессия с
+# достаточным лимитом → rc 0, linger вызван
+scen_p_e() {
+  new_stack pe; fresh_log
+  local lim="$TMP/limits-pe.conf" rc
+  rm -f "$lim"
+  HF_MEMLOCK=2097152 HFCTL_LIMITS="$lim" HFCTL_KFD="$TMP/kfd-node" \
+    HFCTL_DRI="$TMP/dri-node" hf 'preflight' >/dev/null 2>&1; rc=$?
+  [ -f "$lim" ] || return 1
+  limits_bytes tester 2097152 > "$TMP/limits-pe.expected"
+  cmp -s "$TMP/limits-pe.expected" "$lim" || return 1
+  grep -q 'enable-linger' "$FAUXLOG" && [ "$rc" = 0 ]
+}
+
+# P-F idempotence: файл заранее равен рендеру → install в журнале 0 раз;
+# «чужое» содержимое → переписан (журнал + байты)
+scen_p_f() {
+  new_stack pf; fresh_log
+  local lim="$TMP/limits-pf.conf" rc
+  limits_bytes tester 2097152 > "$lim"
+  HF_MEMLOCK=2097152 HFCTL_LIMITS="$lim" HFCTL_KFD="$TMP/kfd-node" \
+    HFCTL_DRI="$TMP/dri-node" hf 'preflight' >/dev/null 2>&1; rc=$?
+  [ "$rc" = 0 ] || return 1
+  [ "$(grep -c 'install -m 0644' "$FAUXLOG" || true)" = 0 ] || return 1
+  fresh_log
+  printf 'someone soft memlock 64\n' > "$lim"
+  HF_MEMLOCK=2097152 HFCTL_LIMITS="$lim" HFCTL_KFD="$TMP/kfd-node" \
+    HFCTL_DRI="$TMP/dri-node" hf 'preflight' >/dev/null 2>&1; rc=$?
+  [ "$rc" = 0 ] || return 1
+  grep -q 'install -m 0644' "$FAUXLOG" || return 1
+  limits_bytes tester 2097152 > "$TMP/limits-pf.expected"
+  cmp -s "$TMP/limits-pf.expected" "$lim"
+}
+
+# P-G низкий memlock сессии: файла нет + субшелл с реальным builtin
+#   ulimit -l 65536 (hard=65536; одиночный `ulimit -Hl` в песочнице даёт
+#   EINVAL: cur>max) → rc 42, warn «Требуется ребут», файл записан, linger
+#   не достигнут
+scen_p_g() {
+  new_stack pg; fresh_log
+  local lim="$TMP/limits-pg.conf" out rc
+  rm -f "$lim"
+  out=$( ( ulimit -l 65536; \
+           HFCTL_LIMITS="$lim" HFCTL_KFD="$TMP/kfd-node" HFCTL_DRI="$TMP/dri-node" \
+           hf 'preflight' ) 2>&1 ); rc=$?
+  printf '%s' "$out" | grep -q 'Требуется ребут' \
+    && [ -f "$lim" ] && [ "$rc" = 42 ] \
+    && ! grep -q 'enable-linger' "$FAUXLOG"
+}
+
+# P-H полный no-op (эмуляция FAEX/evo): всё на месте, группы ок, limits равен,
+# linger уже включён → rc 0; в журнале нет apt/usermod/install-limits/enable-linger
+scen_p_h() {
+  new_stack ph; fresh_log
+  local lim="$TMP/limits-ph.conf" rc n_bad
+  limits_bytes tester 1318060032 > "$lim"
+  HFCTL_FAUX_LINGER=1 HFCTL_LIMITS="$lim" HFCTL_KFD="$TMP/kfd-node" \
+    HFCTL_DRI="$TMP/dri-node" HF_PATH="$FAUX_FULL:$PATH" \
+    hf 'preflight' >/dev/null 2>&1; rc=$?
+  n_bad=$(grep -cE 'apt-get|usermod|install -m 0644|enable-linger' "$FAUXLOG" || true)
+  [ "$rc" = 0 ] && [ "${n_bad:-0}" = 0 ]
+}
+
+# инвентарь маркеров: 9 имён на месте, счёт по локациям верный
 check_markers() {
   local m
-  for m in off-stop orphan-heal lock-reclaim pod-infra containers-conf; do
+  for m in off-stop orphan-heal lock-reclaim pod-infra containers-conf preflight-pkgs gpu-gate gpu-groups gpu-limits; do
     grep -rq "# fix:$m" "$ROOT/lib" || { echo "маркер # fix:$m отсутствует"; return 1; }
   done
   [ "$(grep -c '# fix:off-stop'    "$ROOT/lib/autostart.sh")" = 1 ] || return 1
@@ -384,6 +588,10 @@ check_markers() {
     s=$((s + c))
   done
   [ "$s" = 3 ] || return 1
+  [ "$(grep -c '# fix:preflight-pkgs' "$ROOT/lib/stack.sh")" = 2 ] || return 1
+  [ "$(grep -c '# fix:gpu-gate'       "$ROOT/lib/stack.sh")" = 1 ] || return 1
+  [ "$(grep -c '# fix:gpu-groups'     "$ROOT/lib/stack.sh")" = 1 ] || return 1
+  [ "$(grep -c '# fix:gpu-limits'     "$ROOT/lib/stack.sh")" = 1 ] || return 1
 }
 
 # ── мутационный движок ───────────────────────────────────────────────────────
@@ -438,7 +646,7 @@ else
 fi
 
 echo "== 1. инвентарь маркеров # fix:<имя> (защита от дрейфа)"
-if check_markers; then ok "5 имён маркеров на месте, счёт по локациям 1/2/2/2/3"; else bad "инвентарь маркеров: $(check_markers 2>&1)"; fi
+if check_markers; then ok "9 имён маркеров на месте, счёт по локациям 1/2/2/2/3/2/1/1/1"; else bad "инвентарь маркеров: $(check_markers 2>&1)"; fi
 
 echo "== 2. Ф1 off: явный podman stop основного контейнера"
 if scen_f1_fail; then ok "Ф1: compose stop rc 1 → podman stop hipfire_hipfire_1 вызван, off дошёл до «ВЫКЛ» rc 0"; else bad "Ф1 позитив (compose stop fail)"; fi
@@ -466,7 +674,17 @@ echo "== 6. Ф5 CONTAINERS_CONF: доставка + env-контракт compose
 if scen_f5_deliver; then ok "Ф5: cmd_autostart поставил .hfctl-containers.conf и отрендерил юниты с Environment"; else bad "Ф5 позитив (cmd_autostart)"; fi
 if scen_f5_env; then ok "Ф5: compose() — env выставлен при файле, UNSET при отсутствии"; else bad "Ф5 позитив (env-контракт)"; fi
 
-echo "== 7. мутации: вырезание по маркерам на КОПИИ дерева → сценарий падает"
+echo "== 7. 13.2 preflight: apt-пятёрка + GPU-подготовка (гейт/группы/limits.d)"
+if scen_p_a; then ok "P-A: pkgs-missing — apt-пятёрка одним списком (5 имён), update перед install, rc 0"; else bad "P-A позитив (apt-пятёрка)"; fi
+if scen_p_b; then ok "P-B: pkgs-present — apt-get в журнале 0 раз, rc 0"; else bad "P-B позитив (всё на месте — apt не звался)"; fi
+if scen_p_c; then ok "P-C: не-GPU — info-пропуск + §6.3-die, ноль мутаций"; else bad "P-C позитив (гейт)"; fi
+if scen_p_d; then ok "P-D: группы свежие — usermod render,video, «после перезахода», rc 42"; else bad "P-D позитив (группы)"; fi
+if scen_p_e; then ok "P-E: limits-файла нет — создан, байты == рендер, rc 0, linger вызван"; else bad "P-E позитив (запись limits)"; fi
+if scen_p_f; then ok "P-F: limits idempotent — равен → install 0 раз; чужой → переписан"; else bad "P-F позитив (cmp-idempotence)"; fi
+if scen_p_g; then ok "P-G: низкий memlock сессии (настоящий ulimit) — rc 42, warn «ребут», файл записан"; else bad "P-G позитив (низкий ulimit)"; fi
+if scen_p_h; then ok "P-H: полный no-op (FAEX/evo) — rc 0, в журнале нет apt/usermod/install/linger"; else bad "P-H позитив (happy no-op)"; fi
+
+echo "== 8. мутации: вырезание по маркерам на КОПИИ дерева → сценарий падает"
 check_mutation "off-stop" "$(mutant_marker off-stop off-stop)" scen_f1_fail
 d=$(mutant_marker orphan-heal orphan-heal)
 if [ -n "$d" ]; then
@@ -483,6 +701,10 @@ if grep -q 'Environment=CONTAINERS_CONF' "$ROOT/tpl/systemd/hipfire-compose.serv
 else
   bad "мутация containers-conf-unit: Environment-строки нет в tpl (дрейф)"
 fi
+check_mutation "preflight-pkgs" "$(mutant_marker preflight-pkgs preflight-pkgs)" scen_p_a
+check_mutation "gpu-gate" "$(mutant_marker gpu-gate gpu-gate)" scen_p_c
+check_mutation "gpu-groups" "$(mutant_marker gpu-groups gpu-groups)" scen_p_d
+check_mutation "gpu-limits" "$(mutant_marker gpu-limits gpu-limits)" scen_p_e
 
 printf 'ИТОГО: PASS=%s FAIL=%s\n' "$PASS" "$FAIL"
 [ "$FAIL" = 0 ]

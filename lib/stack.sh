@@ -99,29 +99,96 @@ cur_profile() { local p; p=$(env_val HFCTL_PROFILE); echo "${p:-$PROFILE_DEFAULT
 cur_model()   { env_val HIPFIRE_MODEL; }
 
 # ── префлайт и хост-подготовка ──────────────────────────────────────────────
+# Назначение: GPU-подготовка хоста (И1 «Инварианты поставки») —
+#   самодостаточный шаг preflight (отдельная функция = единица переезда в
+#   bootstrap этапа 14): гейт по наличию устройств (/dev/kfd ИЛИ /dev/dri),
+#   группы render,video для rootless-доступа к GPU, limits.d memlock из
+#   шаблона tpl/etc для NPU-trunk. На машине без GPU-устройств —
+#   info-пропуск и НОЛЬ мутаций (die по §6.3 остаётся в preflight после
+#   этого шага).
+#
+# Побочные эффекты: при наличии устройств — возможно sudo usermod -aG
+#   render,video $USER (когда какой-то из групп нет в id -nG; затем честный
+#   warn и exit 42 — группы действуют только после перезахода) и возможно
+#   sudo install -m 0644 limits-файла (рендер
+#   tpl/etc/99-hipfire-memlock.conf.tpl с __USER__/__MEMLOCK__; пишется
+#   только когда файла нет ИЛИ содержимое отличается от рендера — cmp;
+#   сразу после записи при низком ulimit -Hl текущей сессии — прежний warn
+#   и exit 42). Временный файл рендера удаляется во всех ветках. Читает
+#   id -nG, ulimit -Hl. В stdout — log-строки, в stderr — warn().
+#
+# Ограничения/допущения: требует глобалы MEMLOCK, TPL_DIR (диспетчер),
+#   render_tpl (stack_files.sh) и log/warn/die. env-крючки — только
+#   selfcheck, прод не переопределяет: HFCTL_KFD/HFCTL_DRI — пути гейта
+#   (дефолты /dev/kfd, /dev/dri; шапка autostart.sh использует те же имена
+#   с другими дефолтами — glob renderD*; конфликтов нет: разные сценарии,
+#   в проде env пуст), HFCTL_LIMITS — путь limits-файла (дефолт
+#   /etc/security/limits.d/99-hipfire-memlock.conf; doctor и uninstall
+#   продолжают хардкодить фактическое имя — прод-путь одинаков). Нет
+#   группы render/video в системе → usermod умирает по set -e со своим rc —
+#   громкий честный отказ (Ubuntu/Debian обе группы имеют). Крайний случай
+#   kfd-нет + dri-есть (полусломанный драйвер): шаг применится, затем
+#   preflight умрёт по §6.3 — мутации идемпотентны и безвредны.
+#
+# @returns integer # всегда 0 при возврате — exit 42 (перезаход/ребут)
+#   завершает процесс, не возвращаясь вызывающему
+gpu_prep() {
+  local kfd="${HFCTL_KFD:-/dev/kfd}" dri="${HFCTL_DRI:-/dev/dri}"
+  # GPU-подготовка хоста (И1): только при наличии устройств; не-GPU — info-пропуск
+  if [ -e "$kfd" ] || [ -e "$dri" ]; then
+    if ! id -nG | grep -qw render || ! id -nG | grep -qw video; then
+      log "добавляю $USER в группы render,video (sudo точечно)"
+      sudo usermod -aG render,video "$USER"                        # fix:gpu-groups
+      warn "группы применятся только после перезахода. Выйди и зайди снова, затем повтори install."
+      exit 42
+    fi
+    # memlock для NPU-trunk (limits.d; требует ребута/пересоздания сессий)
+    local lim="${HFCTL_LIMITS:-/etc/security/limits.d/99-hipfire-memlock.conf}"
+    local tmp; tmp=$(mktemp)
+    render_tpl "$TPL_DIR/etc/99-hipfire-memlock.conf.tpl" "$tmp" \
+      MEMLOCK="$MEMLOCK" USER="$USER"
+    if ! cmp -s "$tmp" "$lim"; then
+      log "пишу $lim (memlock $MEMLOCK)"
+      sudo install -m 0644 "$tmp" "$lim"                           # fix:gpu-limits
+      if [ "$(ulimit -Hl)" != "unlimited" ] && [ "$(ulimit -Hl)" -lt "$MEMLOCK" ]; then
+        warn "текущая сессия ещё с memlock=$(ulimit -Hl). Требуется ребут (или перезаход+сервис-менеджер). Повтори install после ребута."
+        rm -f "$tmp"; exit 42
+      fi
+    fi
+    rm -f "$tmp"
+  else
+    log "GPU-устройства не найдены ($kfd, $dri) — GPU-подготовка пропущена"   # fix:gpu-gate
+  fi
+}
+
 # Назначение: проверка окружения и разовая подготовка хоста перед
-#   install/use: не-root, дистрибутив Ubuntu/Debian, AMD GPU (/dev/kfd),
-#   объём RAM, podman + podman-compose + curl, группа render, memlock из
-#   limits.d для NPU-trunk, linger для жизни сервера без логина и при boot.
+#   install/use: не-root, дистрибутив Ubuntu/Debian, GPU-подготовка хоста
+#   (gpu_prep выше; на не-GPU машине — info-пропуск), AMD GPU (/dev/kfd —
+#   железный гейт §6.3, отказ до apt/скачиваний), объём RAM, apt-пятёрка
+#   (podman, podman-compose, containers-storage, psmisc, curl — одним
+#   need-списком), linger для жизни сервера без логина и при boot. Живые
+#   вызовы — cmd_install и cmd_use (commands.sh) до любых изменений системы.
 #
-# Побочные эффекты: sudo точечно — apt-get install podman/podman-compose и
-#   curl (при отсутствии), usermod -aG render $USER, создание
-#   /etc/security/limits.d/99-hipfire-memlock.conf (две строки memlock для
-#   $USER через tee/tee -a), loginctl enable-linger $USER. Читает
-#   /etc/os-release, /proc/meminfo, группы юзера, свой ulimit -Hl,
-#   loginctl-свойство Linger. В stdout — log-строки, в stderr — warn().
-#   .env и файлы стека не трогает.
+# Побочные эффекты: sudo точечно — apt-get update + install (один вызов при
+#   непустом need-списке; всё на месте — apt не вызывается вовсе),
+#   usermod -aG render,video и limits-файл (см. gpu_prep),
+#   loginctl enable-linger $USER. Читает /etc/os-release, /proc/meminfo,
+#   группы юзера, свой ulimit -Hl, loginctl-свойство Linger. В stdout —
+#   log-строки, в stderr — warn(). .env и файлы стека не трогает.
 #
-# Ограничения/допущения: запуск от root — die. Требуются глобалы MEMLOCK
-#   (диспетчер) и log/warn/die. Локалы: id — $ID из os-release (ubuntu и
-#   debian проходят, прочее die, затеняет утилиту id), mem_kb — MemTotal в
-#   КиБ (порог 57671680 КиБ ≈ 58 GB decimal, в тексте предупреждения
-#   назван ~58 GiB), lim — фиксированный путь limits.d-файла. Два
-#   намеренных exit 42 — группа render ещё не действует и limits.d только
-#   что записан при низком memlock текущей сессии — завершают процесс
-#   диспетчера с требованием повторить install после перезахода/ребута;
-#   прочие отказы — die (exit 1). Живые вызовы — cmd_install и cmd_use
-#   (commands.sh) до любых изменений системы.
+# Ограничения/допущения: запуск от root — die. Требуются глобалы MEMLOCK,
+#   TPL_DIR (диспетчер), gpu_prep, render_tpl и log/warn/die. Локалы: id —
+#   $ID из os-release (ubuntu и debian проходят, прочее die, затеняет
+#   утилиту id), mem_kb — MemTotal в КиБ (порог 57671680 КиБ ≈ 58 GB
+#   decimal, в тексте предупреждения назван ~58 GiB), need — строка имён
+#   пакетов (разбиение намеренное: имена без пробелов). Порядок: GPU-шаг до
+#   железного гейта и apt — не-GPU машина получает info-пропуск, затем die,
+#   ноль мутаций до отказа; GPU-машина с неполными группами получает
+#   exit 42 раньше apt (меньше sudo-работы до перезахода). Два намеренных
+#   exit 42 — группы ещё не действуют и limits.d только что записан при
+#   низком memlock текущей сессии — завершают процесс диспетчера с
+#   требованием повторить install после перезахода/ребута; прочие отказы —
+#   die (exit 1).
 #
 # @returns integer # всегда 0 при возврате — exit 42 (перезаход/ребут) и
 #   die (exit 1) завершают процесс, не возвращаясь вызывающему
@@ -130,31 +197,22 @@ preflight() {
   local id
   id=$(. /etc/os-release && echo "$ID")
   case "$id" in ubuntu|debian) ;; *) die "дистрибутив '$id' не поддерживается (нужен Ubuntu/Debian)" ;; esac
-  [ -e /dev/kfd ] || die "/dev/kfd нет: AMD GPU не виден (проверь драйвер amdgpu)"
+  gpu_prep
+  # железный гейт §6.3: путь через хук (см. Ограничения gpu_prep), текст прежний
+  [ -e "${HFCTL_KFD:-/dev/kfd}" ] || die "/dev/kfd нет: AMD GPU не виден (проверь драйвер amdgpu)"
   local mem_kb; mem_kb=$(awk '/MemTotal/{print $2}' /proc/meminfo)
   [ "$mem_kb" -ge 57671680 ] || warn "RAM ${mem_kb}kB < ~58 GiB: 27B@262K может не влезть (нужна Halo 60 GiB+)"
-  if ! command -v podman >/dev/null || ! command -v podman-compose >/dev/null; then
-    log "установка podman + podman-compose (sudo точечно)"
-    sudo apt-get update -qq && sudo apt-get install -y -qq podman podman-compose
-  fi
-  command -v curl >/dev/null || sudo apt-get install -y -qq curl
-  # группа render для /dev/kfd rootless
-  if ! id -nG | grep -qw render; then
-    log "добавляю $USER в группу render (sudo точечно)"
-    sudo usermod -aG render "$USER"
-    warn "группа применится только после перезахода. Выйди и зайди снова, затем повтори install."
-    exit 42
-  fi
-  # memlock для NPU-trunk (limits.d; требует ребута/пересоздания сессий)
-  local lim="/etc/security/limits.d/99-hipfire-memlock.conf"
-  if [ ! -f "$lim" ]; then
-    log "пишу $lim (memlock $MEMLOCK)"
-    echo "$USER soft memlock $MEMLOCK" | sudo tee "$lim" >/dev/null
-    echo "$USER hard memlock $MEMLOCK" | sudo tee -a "$lim" >/dev/null
-    if [ "$(ulimit -Hl)" != "unlimited" ] && [ "$(ulimit -Hl)" -lt "$MEMLOCK" ]; then
-      warn "текущая сессия ещё с memlock=$(ulimit -Hl). Требуется ребут (или перезаход+сервис-менеджер). Повтори install после ребута."
-      exit 42
-    fi
+  # apt-пятёрка одним need-списком: containers-storage — inspect storage-сироты
+  # (13.1 Ф2), psmisc даёт fuser для реклейма лока (13.1 Ф3)
+  local need=""
+  command -v podman >/dev/null             || need+=" podman"
+  command -v podman-compose >/dev/null     || need+=" podman-compose"
+  command -v containers-storage >/dev/null || need+=" containers-storage"   # fix:preflight-pkgs
+  command -v fuser >/dev/null              || need+=" psmisc"               # fix:preflight-pkgs
+  command -v curl >/dev/null               || need+=" curl"
+  if [ -n "$need" ]; then
+    log "установка пакетов:$need (sudo точечно)"
+    sudo apt-get update -qq && sudo apt-get install -y -qq $need
   fi
   # linger: сервер должен жить без активного логина и при boot
   if [ "$(loginctl show-user "$USER" --property=Linger 2>/dev/null | cut -d= -f2)" != "yes" ]; then
