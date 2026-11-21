@@ -59,8 +59,8 @@ hfctl install             # preflight → модели → конфиг → ст
 | `hfctl logs [-f] [N]` | Логи контейнера сервера (по умолчанию хвост N=50) |
 | `hfctl watch [--interval N]` | Живой дашборд обработки (дефолт N=2 c): один коллектор — `/stats`, `/metrics`, host `/sys` (hwmon AMD-карты, k10temp), `/proc`, `podman logs -f`. **На TTY — TUI** (curses, alt-экран): блок «Движок» (Model, Uptime, Queue (`queue_depth`), Errors (`hipfire_requests_failed_total` — только когда >0), τ avg (`hipfire_spec_tau`), Served (`requests_served`), Retries (`retries_attempted` — только когда ≠0), Cache tok (`hipfire_cached_prompt_tokens_total`, compact-формат токенов: <1000 — целое, ≥1000 → `99.1k`, ≥1M → `1.2M`; при недоступности `/stats` блок = «недоступен», остальное живёт)), «Железо» (GPU freq, GPU load, GPU power, GPU temp — max по hwmon первой AMD-карты, CPU temp), «Скорость» (честные метрики: движок обновляет счётчики токенов только в done-событии, live-скорости в процессе нет — `decode tok/s` = `recent_tok_s` из `/stats` (последний завершённый запрос, нет данных → `-`), `prefill tok/s` = среднее гистограммы `hipfire_prefill_tokens_per_second` (`_sum`/`_count`, нет образцов → `-`), sparkline ~60 с — Δ`prompt_tokens`/Δ`completion_tokens` за тик (активность, пики на завершении; НЕ скорость)), «Память» (RAM: MemAvailable/Total GiB + bar, Swap, KV pages), «Логи» (сид `podman logs --tail 50` при старте — стартовые строки видны сразу + live `podman logs -f`, нижняя зона на всю ширину; «(ждём логи…)» только пока и сид пуст, и новых строк нет). Клавиши: `q` — выход, `+`/`-` — интервал 1..10 c, `p` — пауза логов. Минимальный терминал 80×24; при меньшем — деградация (блоки сжимаются клипом
 контент-хвостов, «Логи» держит минимум 3 строки), не краш; не-UTF-8/кривой TERM — ASCII-глифы либо фолбэк в plain-режим. Пороги цветом: RAM < 10 GiB — красный, CPU temp и GPU temp — жёлтый 80…89 °C, красный ≥90 °C (ровно границы), GPU load < 5% при очереди > 0 — подсветка (подозрение на зависание). **В не-TTY (пайп/лог-файл) — стрим**: строка БЕСУСЛОВНО раз в N c (первая сразу) с полным срезом — `очередь` / `обслужено` (+дельта, когда >0) / `cache tok` (тот же компактный формат; без цвета — в plain ANSI не печатается) / `ошибки` (только >0) / `ретраи` (только ≠0) / prefill tok/s (avg из гистограммы) / decode tok/s (последний запрос, `recent_tok_s`) / `mem: avail/total GiB` / `swap` / `gpu: tempC sclkMHz powerW busy%` / `cpu: tctlC` (поле без датчика — `?`). Сервер недоступен — строка «сервер недоступен (нет /stats…)» раз в 30 c (первая сразу), без дублей, восстановление без перезапуска. Выход: `q` или Ctrl-C (rc 0) |
-| `hfctl on` | Включить автозапуск (юнит+таймер+linger) и поднять стек |
-| `hfctl off` | Остановить стек **и** снять с автозапуска (юниты disable, вотчдог выключен, linger off). Файлы, модели, образ целы |
+| `hfctl on` | Включить автозапуск (юнит+таймер+linger) и поднять стек. Аномалии подъёма самолечатся — §14 |
+| `hfctl off` | Остановить стек **и** снять с автозапуска (юниты disable, вотчдог выключен, linger off). Остановка двусоставная (§14): `compose stop` + явный `podman stop` основного контейнера. Файлы, модели, образ целы |
 | `hfctl uninstall [--purge-models] [--purge-image]` | Полная зачистка: контейнеры, сеть проекта, state-каталоги `profiles/` + legacy-вольюмы, юниты, limits.d, маркеры, `~/hipfire` (модели при сохранении переезжают и возвращаются). Подтверждение с перечнем; по умолчанию модели и образ щадит |
 
 Вспомогательные:
@@ -291,7 +291,8 @@ UX-обещания, зафиксированные этапом 9 (детали
      через минуту; ранний up при полупустом `/dev/dri` запечатал бы
      неполный снэпшот), при готовом — тот же `hf_up_devsafe`.
   Штатный подъём (up → running) ничего не создаёт и не удаляет; lock
-  прежний (`$STACK_DIR/.hfctl.lock`, flock -n, занято — «пропуск»).
+  прежний (`$STACK_DIR/.hfctl.lock`, flock -n, занято — попытка реклейма
+  зависших держателей по §14, иначе «пропуск»).
   Прежний механизм «`--force-recreate` со 2-й попытки под блокирующим
   flock -w 120» (round 3, 2026-11-11) удалён: сигнатурный rm точнее и
   закрывает вотчдог тоже (раньше вотчдог поднимал мёртвый контейнер
@@ -299,3 +300,68 @@ UX-обещания, зафиксированные этапом 9 (детали
   (`HFCTL_KFD`/`HFCTL_DRI`) переопределяется env только для shell-приёмок
   selfcheck, в проде не используется.
 
+## 14 · Самолечение аномалий подъёма/остановки (13.1 hardening, 2026-11-21)
+
+Контракт фиксов по инциденту 2026-11-21 (evo, прод вниз ~5 ч: рассинхрон
+libpod-БД и storage-слоя podman → вечный «already in use by an external
+entity»; pod с пустым INFRA ID; SIGKILL-выжившие держатели `.hfctl.lock`;
+неполный `compose stop` при rootless-netns баге). Поведение сервера и
+happy-path не меняются; каждая защита срабатывает только при своей аномалии.
+В коде защиты помечены маркерами `# fix:<имя>` — по ним мутационная батарея
+`tests/run_checks.sh` вырезает фикс на копии дерева и проверяет, что
+ассерты сценария падают («защита реально держит»).
+
+- **off — остановка двусоставная.** `hfctl off` после `compose stop` делает
+  явный `podman stop` основного контейнера (`hipfire_hipfire_1`), тихо и
+  отказоустойчиво (`|| true`): compose stop при rootless-netns баге
+  (AppArmor pasta denied signal) падает на init-контейнере до основного →
+  молчаливо неполный stop, при этом «hfctl off» говорил «остановлен».
+  `hfctl off` доходит до итоговых строк при любом rc остановки. Контракт
+  `stop_with_marker` (§13, маркер ДО stop) не тронут; `down` остаётся
+  одноэтапным (симметрия down — отдельный пункт, не в этом контракте).
+- **up — самолечение storage-сироты (оба up-пути).** `hf_up_locked` и
+  `hf_up_devsafe` при контейнере проекта ≠ running распознают в выводе up
+  сигнатуру «already in use by <12…64-hex> … external entity» → удаляют
+  сироту `containers-storage delete-container <ID>` → один retry up
+  (контракт «максимум ДВЕ попытки up на вызов» не расширяется; в devsafe
+  диагноз выбирает ОДНО лечение — девайс-ветка §13 имеет приоритет). Кап
+  самолечений за процесс — `HEAL_MAX` (default 2). Бинаря containers-storage
+  нет → WARN с ручной командой, поведение как прежде. ID, видимый libpod, —
+  не сирота, не трогается (страховка от удаления живого контейнера при
+  обратном рассинхроне).
+- **up — реклейм зависших держателей лока.** При неудаче первого `flock -n`
+  на `$STACK_DIR/.hfctl.lock` оба up-пути зовут `hf_lock_reclaim`: держатели
+  идентифицируются fuser; `kill -9` — только держателю старше
+  `LOCK_STALE_SECS` (default 900 с = `TimeoutStartSec` юнита: легитимный
+  держатель живёт ≤ ~7 мин бюджета `_boot` + хвост; дольше — SIGKILL-
+  выжившие `KillMode=process`-дети) с cmdline, матчащим `podman|hfctl`.
+  Свежий держатель (здоровый параллельный boot/watchdog/up) и чужой процесс
+  не трогаются; нет fuser/lsof — тихая деградация к прежнему «up уже
+  выполняется — пропуск». Happy-path не порождает ни одного лишнего
+  процесса (реклейм зовётся только после неудачи `flock -n`).
+- **up — pristine-проверка pod проекта.** Перед первым compose up (внутри
+  лока) оба up-пути проверяют `podman pod inspect pod_hipfire`: пустой
+  `InfraContainerID` → `podman pod rm -f pod_hipfire` → штатный up
+  пересоздаёт pod; pod нет / inspect отказал (свежий стек) → no-op.
+- **CONTAINERS_CONF — скоуп slirp4netns на стек.** Статичный файл
+  `tpl/etc/hfctl-containers.conf` (`[network] default_rootless_network_cmd =
+  "slirp4netns"` — ровно проверенный EXP-013 обход AppArmor pasta-бага
+  teardown netns) доставляется в `$STACK_DIR/.hfctl-containers.conf` из
+  двух мест: `write_stack_files` (install/use — путь обновления существующих
+  машин) и `cmd_autostart` (строго ДО рендера юнитов — инвариант «юниты
+  рендерятся только при наличии файла»; в `sync_tree` доставка НЕ встроена —
+  он no-op на существующих стеках). `compose()` экспортирует
+  `CONTAINERS_CONF` только при наличии файла: старый стек без файла → env
+  чист, поведение как прежде. Оба юнит-шаблона (`hipfire-compose.service`,
+  `hipfire-compose-watchdog.service`) несут
+  `Environment=CONTAINERS_CONF=__STACK_DIR__/.hfctl-containers.conf`
+  (покрывает `_boot`/`_watchdog` целиком). Глобальный `~/.config/containers`
+  не трогается; прямые podman-вызовы hfctl (inspect/stop/rm) env не
+  получают — сетевой бэкенд значим только при create/netns, storage общий
+  (EXP-013: graphRoot идентичен с env и без).
+
+Константы-крючки — шапка `lib/autostart.sh`: `LOCK_STALE_SECS`
+(env `HFCTL_LOCK_STALE`), `HEAL_MAX` (env `HFCTL_HEAL_MAX`), счётчик
+`HF_ORPHAN_HEALS`. env-оверрайды — только для selfcheck-батареи, продом не
+используются. Внешний хвост (EXP при деплое): скорость первого pull моделей
+под slirp4netns; off/up при живом pasta-баге останавливает/поднимает стек.

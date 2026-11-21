@@ -12,24 +12,34 @@ CF=( -f compose.yml -f compose.halo.yml -f compose.local.yml )
 #   (CF: compose.yml + compose.halo.yml + compose.local.yml) с рабочим
 #   каталогом $STACK_DIR — podman-compose не читает COMPOSE_FILE, поэтому
 #   -f перечисляются при каждом вызове (здесь и собрано это «каждом»).
+#   При наличии $STACK_DIR/.hfctl-containers.conf — CONTAINERS_CONF скоупится
+#   на стек (slirp4netns вместо pasta, обход AppArmor-бага teardown netns,
+#   §14 SPEC); файла нет (старый стек до обновления) → env чист, поведение
+#   как прежде. Глобальный ~/.config/containers не трогается никогда.
 #
 # Побочные эффекты: всё, что делает podman compose подкоманда: lifecycle
 #   контейнеров и томов (up/stop/down), одноразовые run-контейнеры, подтяжка
-#   образа, чтение compose-троек из $STACK_DIR. cwd вызывающего не меняется
-#   (cd выполняется в субшелле).
+#   образа, чтение compose-троек из $STACK_DIR; экспорт CONTAINERS_CONF в
+#   окружение субшелла (только когда файл стека на месте). cwd вызывающего
+#   не меняется (cd выполняется в субшелле).
 #
 # Ограничения/допущения: требуются глобал STACK_DIR (диспетчер) и CF этого
 #   файла. Имя функции затеняет внешний одноимённый бинарь compose. stdout
 #   pass-through: живые вызывающие сами tail-ят вывод или заглушают rc
 #   (`|| true` в autostart.sh watchdog/boot). Сбой cd при отсутствующем
-#   STACK_DIR даёт rc субшелла без вывода.
+#   STACK_DIR даёт rc субшелла без вывода. Прямые podman-вызовы hfctl
+#   (inspect/stop/rm) env не получают — сетевой бэкенд значим только при
+#   create/netns, storage общий (EXP-013: graphRoot идентичен с env и без).
 #
 # @param 1: string[] # rest от $1: подкоманда и флаги podman compose (живые:
 #   run, up -d [--force-recreate], stop, down)
 # @stdout string     # вывод podman compose как есть (stderr НЕ слит —
 #   сливают вызывающие через 2>&1)
 # @returns integer   # rc podman compose либо rc cd при недоступном STACK_DIR
-compose() { ( cd "$STACK_DIR" && podman compose "${CF[@]}" "$@" ); }
+compose() { ( cd "$STACK_DIR" || exit
+  # скоуп containers.conf только для стека (файл нет → env чист, как прежде)
+  if [ -f "$STACK_DIR/.hfctl-containers.conf" ]; then export CONTAINERS_CONF="$STACK_DIR/.hfctl-containers.conf"; fi   # fix:containers-conf
+  podman compose "${CF[@]}" "$@" ); }
 
 # Назначение: значение ключа из $STACK_DIR/.env — первая строка вида
 #   КЛЮЧ=...; значение берётся справа от первого '=' целиком (значение может

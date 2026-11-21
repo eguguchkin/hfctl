@@ -7,6 +7,15 @@ DRI_GLOB="${HFCTL_DRI:-/dev/dri/renderD*}"   # глоб render-нод; env HFCTL
 GPU_WAIT_TIMEOUT=60  # сек ожидания GPU-нод перед первым up в _boot (gpu_ready_or_die)
 GPU_WAIT_INTERVAL=2  # интервал опроса GPU-нод в gpu_ready_or_die
 
+# ── константы самолечения (env-оверрайды — только для selfcheck-батареи,
+#    продом не переопределяются) ─────────────────────────────────────────────
+LOCK_STALE_SECS="${HFCTL_LOCK_STALE:-900}"   # порог «зависший держатель лока», с
+                                             # (= TimeoutStartSec юнита: легитимный
+                                             # up ≤ ~7 мин + хвост; дольше — SIGKILL-
+                                             # выживший, см. GOTCHAS окна 2026-11-21)
+HEAL_MAX="${HFCTL_HEAL_MAX:-2}"              # кап storage-самолечений за процесс
+HF_ORPHAN_HEALS=0                            # счётчик storage-самолечений (глобал)
+
 # Назначение: предикат «GPU-ноды на месте» — /dev/kfd И хотя бы одна renderD*;
 #   гейт перед любым compose up в _boot/_watchdog: ранний up при полупустом
 #   /dev/dri печатает в свежесозданный контейнер неполный device-снэпшот.
@@ -131,7 +140,9 @@ cmd_on()  { cmd_autostart; cmd_up; }
 #
 # Побочные эффекты: stop_with_marker (маркер ДО stop + compose stop; вывод
 #   и rc заглушены — «вотчдог оглушён даже при сбое остановки», семантика
-#   cmd_down); systemctl --user disable hipfire-compose.service и
+#   cmd_down) + явный podman stop основного контейнера ($CONTAINER, тихо и
+#   отказоустойчиво — compose stop при rootless-netns баге бывает неполным,
+#   §14 SPEC); systemctl --user disable hipfire-compose.service и
 #   hipfire-compose-watchdog.timer (stderr заглушён, rc — `|| true`); rm -f
 #   трёх юнит-файлов ~/.config/systemd/user/{hipfire-compose.service,
 #   hipfire-compose-watchdog.service, hipfire-compose-watchdog.timer};
@@ -157,6 +168,10 @@ cmd_off() {
   # Юнит oneshot контейнеры не держит (compose up -d отсоединён) — останавливаем
   # стек напрямую, иначе ExecStop не выполнится для уже завершённого юнита.
   stop_with_marker >/dev/null 2>&1 || true
+  # compose stop при rootless-netns баге (AppArmor pasta denied signal) падает
+  # на init-контейнере ДО основного → молчаливо неполный stop; прямой podman stop
+  # netns-teardown проекта не делает и доходит всегда (окно 2026-11-21).
+  podman stop "$CONTAINER" >/dev/null 2>&1 || true   # fix:off-stop
   systemctl --user disable "$UNIT_NAME.service" "$UNIT_NAME-watchdog.timer" 2>/dev/null || true
   rm -f "$HOME/.config/systemd/user/$UNIT_NAME.service" \
         "$HOME/.config/systemd/user/$UNIT_NAME-watchdog.service" \
@@ -178,7 +193,10 @@ cmd_off() {
 #   render_tpl записывает ~/.config/systemd/user/$UNIT_NAME.service (из
 #   tpl/systemd/hipfire-compose.service.tpl с PODMAN_BIN=$(command -v
 #   podman), STACK_DIR и строкой CF-тройки) и …-watchdog.service (tpl,
-#   STACK_DIR); install -m 0644 копирует статичный
+#   STACK_DIR); install -m 0644 копирует статичный tpl/etc/hfctl-
+#   containers.conf → $STACK_DIR/.hfctl-containers.conf (строго ДО рендера
+#   юнитов — инвариант «юниты рендерятся только при наличии файла», §14);
+#   install -m 0644 копирует статичный
 #   tpl/systemd/hipfire-compose-watchdog.timer.tpl → …-watchdog.timer;
 #   systemctl --user daemon-reload, enable ($UNIT_NAME.service +
 #   $UNIT_NAME-watchdog.timer), start таймера; rm -f маркера
@@ -209,6 +227,9 @@ cmd_autostart() {
   mkdir -p "$unit_dir"
   # юниты ссылаются на $STACK_DIR/hfctl — убедимся, что копия на месте
   sync_tree
+  # CONTAINERS_CONF стека (скоуп slirp4netns, §14) — файл обязан существовать
+  # К моменту рендера юнитов: юнит-шаблоны ссылаются на него через Environment.
+  install -m 0644 "$TPL_DIR/etc/hfctl-containers.conf" "$STACK_DIR/.hfctl-containers.conf"   # fix:containers-conf
   render_tpl "$TPL_DIR/systemd/hipfire-compose.service.tpl" "$unit_dir/$UNIT_NAME.service" \
     PODMAN_BIN="$bin" STACK_DIR="$STACK_DIR" CF="${CF[*]}"
   # вотчдог крашей: rootless podman не оставляет живого наблюдателя после
@@ -227,76 +248,204 @@ cmd_autostart() {
   echo "автозапуск ВКЛ (unit + watchdog-таймер 1м, linger=yes)"
 }
 
+# Назначение: самолечение storage-сироты «already in use by an external
+#   entity» (рассинхрон libpod-БД и storage-слоя podman, GOTCHAS окна
+#   2026-11-21): вынуть ID контейнера-сироты из вывода up, удалить его
+#   containers-storage delete-container и вернуть 0 — вызывающий делает один
+#   retry up. Guard'ы: кап HEAL_MAX за процесс (HF_ORPHAN_HEALS); отсутствие
+#   бинаря containers-storage → WARN с ручной командой, поведение как прежде
+#   (Variant B); ID, видимый libpod, — НЕ сирота, трогать нельзя (страховка
+#   от удаления живого контейнера при обратном рассинхроне).
+#
+# Побочные эффекты: при успехе — containers-storage delete-container <ID>
+#   (самолечение засчитано в глобал HF_ORPHAN_HEALS) и log-строка; при отказе
+#   хила — warn-строка в stderr. Ничего не удаляет, кроме сироты из текста.
+#
+# Ограничения/допущения: требует глобалы HF_ORPHAN_HEALS/HEAL_MAX (шапка) и
+#   log/warn (диспетчер). Синтаксис хила — containers-storage-delete-container(1)
+#   (флагов -f нет; отказ → WARN, поведение = прежнее). ID ищется по
+#   сигнатуре «already in use by <12..64-hex>»; grep глушен `|| true` —
+#   пустой ID = не сирота (rc 1). Вызывается из hf_up_locked и hf_up_devsafe
+#   только при контейнере ≠ running (happy-path не зовёт).
+#
+# @param 1: string  # полный вывод неудачного `compose up` (2>&1)
+# @stdout string   # log-строка при успехе; warn-строки при отказе (stderr)
+# @returns integer # 0 — сирота найдена и удалена; 1 — сигнатуры нет / кап /
+#   бинаря нет / ID видит libpod / delete-container отказался
+hf_orphan_heal() {
+  local id
+  id=$(printf '%s' "$1" | { grep -oE 'already in use by [0-9a-f]{12,64}' || true; } | head -1 | awk '{print $5}')
+  [ -n "$id" ] || return 1
+  [ "$HF_ORPHAN_HEALS" -lt "$HEAL_MAX" ] || return 1        # кап за процесс
+  command -v containers-storage >/dev/null || { warn "containers-storage нет в PATH — самолечение невозможно: sudo apt install containers-storage; вручную: containers-storage delete-container $id"; return 1; }
+  podman inspect -f '{{.State.Status}}' "$id" >/dev/null 2>&1 && { warn "ID $id видит libpod — не сирота, самолечение отменено"; return 1; }
+  HF_ORPHAN_HEALS=$((HF_ORPHAN_HEALS + 1))
+  containers-storage delete-container "$id" || { warn "containers-storage delete-container $id отказался"; return 1; }
+  log "storage-сирота $id удалена (external entity) — повторяю up"
+}
+
+# Назначение: реклейм зависших держателей $STACK_DIR/.hfctl.lock — при неудаче
+#   первого `flock -n` (up/_boot/_watchdog голодали на SIGKILL-выживших,
+#   GOTCHAS окна 2026-11-21): идентифицировать держателей (fuser), убить
+#   kill -9 только если держатель старше LOCK_STALE_SECS И его cmdline
+#   матчит `podman|hfctl`. Свежий держатель (здоровый параллельный
+#   boot/watchdog/up) не трогается; нет fuser — тихая деградация к прежнему
+#   поведению («пропуск»).
+#
+# Побочные эффекты: чтение /proc через fuser/ps; kill -9 зрелых podman/hfctl-
+#   держателей (ядро отпускает flock по закрытию fd); ни одного процесса
+#   не порождает в happy-path (зовётся только после неудачи flock -n).
+#
+# Ограничения/допущения: требует глобал STACK_DIR и LOCK_STALE_SECS (шапка).
+#   Порог 900 с = TimeoutStartSec юнита: тик вотчдога/boot держит лок секунды,
+#   ручной up > 15 мин легитимно невозможен (образ спиннут, init-pull моделей
+#   идёт ВНУТРИ контейнера). Подмена argv (`exec -a`) может ввести в заблуждение
+#   cmdline-предикат — окно сужает etimes-порог. Вызывается из обоих up-субшеллов.
+#
+# @returns integer # всегда 0 — отказы (нет fuser, процесс исчез, kill не взял)
+#   глушены; решение «реклейм не удался» принимает вызывающий вторым flock -n
+hf_lock_reclaim() {
+  local pids p age args
+  pids=$(fuser "$STACK_DIR/.hfctl.lock" 2>/dev/null) || return 0
+  # нет fuser — пробуем lsof; нет ни того ни другого → тихая деградация
+  for p in $pids; do
+    kill -0 "$p" 2>/dev/null || continue
+    age=$(ps -o etimes= -p "$p" 2>/dev/null || true); [ -n "$age" ] || continue
+    [ "$age" -gt "$LOCK_STALE_SECS" ] || continue             # свежий — не трогать
+    args=$(ps -o args= -p "$p" 2>/dev/null || true)
+    printf '%s' "$args" | grep -qE 'podman|hfctl' || continue  # чужой процесс — не трогать
+    kill -9 "$p" 2>/dev/null || true                           # ядро отпустит flock
+  done
+}
+
+# Назначение: pristine-проверка pod'а проекта перед up — pod_hipfire в
+#   состоянии Created с ПУСТЫМ InfraContainerID (наследие эпохи падавших up,
+#   GOTCHAS окна 2026-11-21) переживает всё и ломает каждый create:
+#   podman pod rm -f → штатный up пересоздаст pod сам. Pod нет / inspect
+#   отказал (свежий стек) → no-op.
+#
+# Побочные эффекты: podman pod inspect (чтение); при пустом INFRA ID —
+#   warn-строка и podman pod rm -f pod_hipfire (вывод заглушён, отказ
+#   глушен `|| true`).
+#
+# Ограничения/допущения: имя pod_hipfire захардкожено так же, как CONTAINER и
+#   лейбл io.podman.compose.project (проект compose = имени каталога стека).
+#   Зовётся ВНУТРИ лока обоих up-субшеллов до первого compose up — не гоняется
+#   с вотчдогом. Требует warn (диспетчер).
+#
+# @returns integer # всегда 0 — inspect-отказ (no-op) и удачный rm дают 0
+hf_pod_pristine() {
+  local infra
+  infra=$(podman pod inspect pod_hipfire --format '{{.InfraContainerID}}' 2>/dev/null) || return 0
+  [ -n "$infra" ] || { warn "pod_hipfire с пустым INFRA ID — пересоздаю"; podman pod rm -f pod_hipfire >/dev/null 2>&1 || true; }
+}
+
 # Назначение: `podman compose up -d` под файловым lock'ом: параллельные
 #   поднятия (вотчдог + boot-юнит + ручной up) дерутся за netns — пускаем
-#   только один одновременно.
+#   только один одновременно. При занятом локе — попытка реклейма зависших
+#   держателей (hf_lock_reclaim, §14) и второй flock -n; при storage-сироте
+#   в выводе up (уже running-контейнер ≠ и сигнатура «external entity») —
+#   hf_orphan_heal + один retry up (максимум ДВЕ попытки up на вызов).
 #
 # Побочные эффекты: создание/усечение lock-файла $STACK_DIR/.hfctl.lock
 #   (перенаправление fd 9 в субшелле) с неблокирующим flock, отпускаемым
-#   по выходе субшелла; `podman compose up -d` — запуск
-#   контейнеров (подтяжка образа, init-скачка моделей); stdout — сообщение
-#   пропуска или последние 2 строки compose-вывода.
+#   по выходе субшелла; при занятом локе — hf_lock_reclaim (kill -9 зрелых
+#   podman/hfctl-держателей); hf_pod_pristine (возможный podman pod rm -f
+#   pod_hipfire при пустом INFRA ID); до двух `podman compose up -d` — запуск
+#   контейнеров (подтяжка образа, init-скачка моделей); podman inspect
+#   статуса контейнера; stdout — сообщение пропуска или последние 2 строки
+#   compose-вывода.
 #
-# Ограничения/допущения: требует глобалы STACK_DIR (диспетчер), CF и
-#   compose (stack.sh). Гонка lock'а НЕ ошибка: «up уже выполняется —
-#   пропуск» и return 0 — boot/watchdog намеренно зовут конкурентно. rc
-#   compose up проходит наверх через pipefail (tail сам не падает). Живой
-#   вызов этого файла: cmd_up (cmd_on поднимает через cmd_up); boot-юнит и
-#   вотчдог подняты на hf_up_devsafe — им нужен не голый up, а лечение
-#   device-mismatch (рекон после ребута прод-машины (60 GiB) 2026-11-18).
+# Ограничения/допущения: требует глобалы STACK_DIR, CONTAINER (диспетчер),
+#   CF/compose (stack.sh) и hf_lock_reclaim/hf_pod_pristine/hf_orphan_heal
+#   этого файла. Гонка lock'а НЕ ошибка: «up уже выполняется — пропуск» и
+#   return 0 — boot/watchdog намеренно зовут конкурентно; реклейм трогает
+#   только зрелых (LOCK_STALE_SECS) podman/hfctl-держателей. rc финального up
+#   проходит наверх (return rc): happy-path/вылеченный up → 0, невылеченный
+#   отказ → rc 1 (cmd_up умирает по set -e до wait_health — как прежде).
+#   Лечение запускается ТОЛЬКО при контейнере ≠ running (happy-path без
+#   лишних inspect-веток). Живой вызов этого файла: cmd_up (cmd_on поднимает
+#   через cmd_up).
 #
 # @stdout string   # «up уже выполняется — пропуск» при занятом lock'е либо
-#   последние 2 строки `compose up -d`
-# @returns integer # 0 — стек поднят или пропуск по гонке; ненулевой rc —
-#   сбой `compose up -d` (pipefail пропускает rc наружу)
+#   последние 2 строки последнего `compose up -d`
+# @returns integer # 0 — стек поднят (сразу или после самолечения) или
+#   пропуск по гонке; ненулевой rc — финальный сбой `compose up -d`
 hf_up_locked() {
-  ( flock -n 9 || { echo "up уже выполняется — пропуск"; return 0; }
-    compose up -d 2>&1 | tail -2
+  ( if ! flock -n 9; then
+      hf_lock_reclaim              # fix:lock-reclaim
+      flock -n 9 || { echo "up уже выполняется — пропуск"; return 0; }
+    fi
+    hf_pod_pristine                # fix:pod-infra
+    local out rc=0
+    out=$(compose up -d 2>&1) || rc=$?
+    if [ -n "$out" ]; then printf '%s\n' "$out" | tail -2; fi
+    [ "$(podman inspect -f '{{.State.Status}}' "$CONTAINER" 2>/dev/null)" = running ] || { hf_orphan_heal "$out" && { rc=0; out=$(compose up -d 2>&1) || rc=$?; if [ -n "$out" ]; then printf '%s\n' "$out" | tail -2; fi; }; }   # fix:orphan-heal
+    return "$rc"
   ) 9>"$STACK_DIR/.hfctl.lock"
 }
 
 # Назначение: `compose up -d` под неблокирующим lock'ом с авто-лечением
-#   device-mismatch: podman запечатывает снэпшот /dev/dri в OCI-спеку при
-#   create, а нумерация карточек меняется между загрузками → старт СТАРОГО
-#   контейнера в новом буте падает «cannot stat …» / «Failed to create
-#   container», и обычный up никогда не лечится. Если после up контейнер
-#   проекта не running и вывод up содержит сигнатуру девайс-отказа —
-#   `podman rm -f` контейнеров проекта (лейбл io.podman.compose.project,
-#   имя от каталога стека ~/hipfire) и повторный up: свежий create
-#   запечатывает актуальную нумерацию. Максимум ДВЕ попытки up на вызов.
+#   device-mismatch и storage-сироты: podman запечатывает снэпшот /dev/dri в
+#   OCI-спеку при create, а нумерация карточек меняется между загрузками →
+#   старт СТАРОГО контейнера в новом буте падает «cannot stat …» / «Failed to
+#   create container», и обычный up никогда не лечится; рассинхрон libpod-БД
+#   и storage-слоя даёт «already in use by … external entity» (GOTCHAS окна
+#   2026-11-21). Если после up контейнер проекта не running, диагноз выбирает
+#   ОДНО лечение: девайс-ветка (сигнатура cannot stat/Failed to create
+#   container → podman rm -f по лейблу io.podman.compose.project) либо
+#   hf_orphan_heal (сигнатура сироты → containers-storage delete-container),
+#   затем один retry up: свежий create запечатывает актуальную нумерацию /
+#   чистый storage. Максимум ДВЕ попытки up на вызов. До первого up —
+#   hf_lock_reclaim при занятом локе и hf_pod_pristine.
 #
 # Побочные эффекты: создание/усечение lock-файла $STACK_DIR/.hfctl.lock
-#   (неблокирующий flock, отпускается субшеллом); до двух `compose up -d`
-#   (в stdout — последние 2 строки вывода последнего); при сигнатуре —
-#   podman ps -aq --filter label=… и podman rm -f найденных контейнеров
-#   (вывод заглушён); два podman inspect статуса контейнера.
+#   (неблокирующий flock, отпускается субшеллом; при занятом — реклейм
+#   зрелых держателей); hf_pod_pristine (возможный podman pod rm -f
+#   pod_hipfire); до двух `compose up -d` (в stdout — последние 2 строки
+#   вывода последнего); при сигнатуре — podman ps -aq --filter label=… и
+#   podman rm -f найденных контейнеров, либо containers-storage
+#   delete-container сироты (оба — вывод заглушён); два podman inspect
+#   статуса контейнера.
 #
 # Ограничения/допущения: требует глобалы STACK_DIR, CONTAINER (диспетчер),
-#   CF/compose (stack.sh). rc compose-вызовов заглушен (`|| true`): падение
+#   CF/compose (stack.sh) и hf_lock_reclaim/hf_pod_pristine/hf_orphan_heal
+#   этого файла. rc compose-вызовов заглушен (`|| true`): падение
 #   распознаётся по паре «статус ≠ running + сигнатура в выводе», не по rc —
 #   иные отказы up (pull, сеть) НЕ лечатся (rm не вызывается), хелпер
 #   возвращает 1, дальше решает вызывающий (цикл _boot / тихий уход
-#   вотчдога). Гонка lock'а — не ошибка: «пропуск» и 0 (как hf_up_locked).
-#   Лейбл проекта «hipfire» от каталога стека; если будущий podman-compose
-#   сменит лейбл, rm не найдёт целей и деградация равна прежнему поведению
-#   (юнит перезапустит _boot по rc 1). Не проверяет здоровье движка — только
+#   вотчдога). Девайс-сигнатура проверяется первой — при ней hf_orphan_heal
+#   не зовётся (одно лечение на вызов); кап хилов — HEAL_MAX за процесс.
+#   Гонка lock'а — не ошибка: «пропуск» и 0 (как hf_up_locked). Лейбл
+#   проекта «hipfire» от каталога стека; если будущий podman-compose сменит
+#   лейбл, rm не найдёт целей и деградация равна прежнему поведению (юнит
+#   перезапустит _boot по rc 1). Не проверяет здоровье движка — только
 #   статус контейнера. Живые вызовы: cmd_boot (в цикле) и cmd_watchdog
 #   (через `|| true`) этого файла.
 #
 # @stdout string   # «up уже выполняется — пропуск» при занятом lock'е либо
 #   последние 2 строки последнего `compose up -d`
 # @returns integer # 0 — контейнер проекта running (сразу или после
-#   rm+повторного up); 1 — не running (отказ не девайсный либо retry не спас)
+#   rm+повторного up / хила сироты); 1 — не running (отказ не девайсный и
+#   не сирота, либо retry не спас)
 hf_up_devsafe() {
-  ( flock -n 9 || { echo "up уже выполняется — пропуск"; return 0; }
+  ( if ! flock -n 9; then
+      hf_lock_reclaim              # fix:lock-reclaim
+      flock -n 9 || { echo "up уже выполняется — пропуск"; return 0; }
+    fi
+    hf_pod_pristine                # fix:pod-infra
     local out
     out=$(compose up -d 2>&1) || true
     if [ -n "$out" ]; then printf '%s\n' "$out" | tail -2; fi
-    if [ "$(podman inspect -f '{{.State.Status}}' "$CONTAINER" 2>/dev/null)" != running ] \
-       && printf '%s' "$out" | grep -qE 'cannot stat|Failed to create container'; then
-      podman rm -f $(podman ps -aq --filter label=io.podman.compose.project=hipfire) >/dev/null 2>&1 || true
-      out=$(compose up -d 2>&1) || true
-      if [ -n "$out" ]; then printf '%s\n' "$out" | tail -2; fi
+    if [ "$(podman inspect -f '{{.State.Status}}' "$CONTAINER" 2>/dev/null)" != running ]; then
+      if printf '%s' "$out" | grep -qE 'cannot stat|Failed to create container'; then
+        podman rm -f $(podman ps -aq --filter label=io.podman.compose.project=hipfire) >/dev/null 2>&1 || true
+        out=$(compose up -d 2>&1) || true
+        if [ -n "$out" ]; then printf '%s\n' "$out" | tail -2; fi
+      elif hf_orphan_heal "$out"; then
+        out=$(compose up -d 2>&1) || true   # fix:orphan-heal
+        if [ -n "$out" ]; then printf '%s\n' "$out" | tail -2; fi
+      fi
     fi
     [ "$(podman inspect -f '{{.State.Status}}' "$CONTAINER" 2>/dev/null)" = running ]
   ) 9>"$STACK_DIR/.hfctl.lock"

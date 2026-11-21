@@ -156,6 +156,10 @@ write_stack_files() {
   install -m 0644 "$TPL_DIR/compose/compose.yml" "$STACK_DIR/compose.yml"
   install -m 0644 "$TPL_DIR/compose/compose.halo.yml" "$STACK_DIR/compose.halo.yml"
 
+  # CONTAINERS_CONF стека (скоуп slirp4netns, §14): путь обновления
+  # существующих машин — install/use перезаписывают файл каноном из tpl/.
+  install -m 0644 "$TPL_DIR/etc/hfctl-containers.conf" "$STACK_DIR/.hfctl-containers.conf"   # fix:containers-conf
+
   # compose.local.yml: DFlash-wiring для профилей с draft (mq6-xt не объявляет
   # sidecar в реестре; MQ4 draft — рекомендованный контроллер). Профили без
   # draft (flash-multi: native MTP) получают пустой env = DFlash выключен.
