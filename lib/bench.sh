@@ -12,7 +12,7 @@ BENCH_FIXTURE_MD5=253c7ac50857fe6d0e10fb0d2c5e35c0
 # Назначение: напечатать usage-справку `hfctl bench` (heredoc: режимы, флаги,
 #   артефакт).
 #
-# Побочные эффекты: только stdout; читает глобал STACK_DIR (путь каталога
+# Побочные эффекты: только stdout; читает глобал DATA_DIR (путь каталога
 #   артефактов подставляется в текст). Сеть, файлы, сервер не трогает.
 #
 # Ограничения/допущения: без параметров; текст не выведен из кода cmd_bench —
@@ -30,7 +30,7 @@ hfctl bench — бенч производительности сервера (л
   hfctl bench --parallel N[,M…] параллельные батчи поверх quick/full (целые
                                1..8 через запятую; каждый — один прогон;
                                full без флага = 2,4)
-  hfctl bench --out DIR        каталог артефактов (default $STACK_DIR/bench-runs)
+  hfctl bench --out DIR        каталог артефактов (default $DATA_DIR/bench-runs)
   hfctl bench --json           машиночитаемый JSON в stdout (артефакт всё равно пишется)
   hfctl bench --compare [FILE] дельта с прошлым прогоном (без FILE — свежайший json)
   hfctl bench --fresh          перед прогоном recreate+wait_health — ЕДИНСТВЕННЫЙ
@@ -39,7 +39,7 @@ hfctl bench — бенч производительности сервера (л
 Сервер должен работать (hfctl up). Конфиг сервера bench не меняет, поэтому
 ar-baseline (без спекуляции) печатается как пропущенный: сравнение рук —
 через 'hfctl use' разных профилей.
-Артефакт: $STACK_DIR/bench-runs/<timestamp>.json — база для --compare.
+Артефакт: $DATA_DIR/bench-runs/<timestamp>.json — база для --compare.
 Ctrl-C (SIGINT) или SIGTERM прерывают прогон на любой фазе: частичный прогон
 не сохраняется, начатые запросы доубиваются (rc 130/143).
 EOF
@@ -568,7 +568,7 @@ bench_abort() {
 #     payload-*.json, *_resp, c_*.txt, artifact.json); INT/TERM-трап
 #     (bench_abort) — прерывание с rc 130/143 без артефакта, см. bench_help;
 #     артефакт
-#     $OUT/<timestamp>.json (default $STACK_DIR/bench-runs, mkdir -p) —
+#     $OUT/<timestamp>.json (default $DATA_DIR/bench-runs, mkdir -p) —
 #     база будущих --compare; копирование фикстуры tpl/bench в c_code.txt
 #     (байты-в-байты, md5-гейт — warn при несовпадении, НЕ die) и трёх
 #     ad-hoc промптов (prose/ttft/long/warm); чтение .env через env_val
@@ -655,7 +655,7 @@ cmd_bench() {
   trap 'bench_abort INT 130' INT
   trap 'bench_abort TERM 143' TERM
   : > "$BENCH_TMP/runs.tsv"
-  OUT="${out_dir:-$STACK_DIR/bench-runs}"
+  OUT="${out_dir:-$DATA_DIR/bench-runs}"
   RUNS="$runs"
 
   local prof model md5_real body img ts_iso fname artifact base=""

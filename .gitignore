@@ -3,3 +3,5 @@
 *~
 .local-analysis/
 tpl/python/__pycache__/
+.data/
+.env

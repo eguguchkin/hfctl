@@ -5,9 +5,9 @@
 # git diff v0.4.6..v0.4.7 пуст, F-0.4.7.3) — golden'ы валидны и для
 # 0.4.6/0.4.7 (recon 0.4.6, вопрос 10).
 # Модуль не определяет глобалов; пишет через хелперы диспетчера (log/die),
-# читает SELF/STACK_DIR/TPL_DIR/MODELS_DIR/STATE_BASE/IMAGE/BIND/PORT/
+# читает STACK_DIR/DATA_DIR/TPL_DIR/MODELS_DIR/STATE_BASE/IMAGE/BIND/PORT/
 # DRAFT_FILE (диспетчер), cur_profile (lib/stack.sh), profile_field
-# (lib/profiles.sh). Вызывается из commands.sh (install/use) и autostart.sh
+# (lib/profiles.sh). Вызывается из commands.sh (bootstrap/use) и autostart.sh
 # (render_tpl для systemd-юнитов).
 
 # Назначение: отрендерить один шаблон из tpl/: прочитать файл $1, заменить в
@@ -50,55 +50,18 @@ render_tpl() {
   printf '%s\n' "$tpl" > "$out"
 }
 
-# Назначение: скопировать дерево hfctl (бинарь-диспетчер + lib/ + tpl/) в
-#   $STACK_DIR по правилу «копируем только при отсутствии»: есть в стеке
-#   бинарь — no-op (повторная установка из старого клона НЕ откатывает
-#   свежий стек; обновление — только install.sh, AGENTS правило 5).
-#
-# Побочные эффекты: только при отсутствии $STACK_DIR/hfctl — mkdir -p
-#   $STACK_DIR, install -m 0755 $SELF → $STACK_DIR/hfctl (перезапись) и
-#   rm -rf $STACK_DIR/lib, $STACK_DIR/tpl (старые копии удаляются, inode
-#   меняются) с cp -a обоих каталогов из дерева рядом с диспетчером
-#   (свежие inode, владелец — текущий юзер, атрибуты сохранены). Читает
-#   $SELF и lib/, tpl/ рядом с ним. Когда копия в стеке уже есть или
-#   запускаемся прямо из стека — файлов не касается вовсе.
-#
-# Ограничения/допущения: требует глобалы SELF и STACK_DIR (диспетчер) и
-#   die. Дерево без lib/ или tpl/ рядом с $SELF → die («установи через
-#   git clone + ./install.sh»). Два ранних return 0: копия в стеке
-#   уже есть; $SELF и есть $STACK_DIR/hfctl (юниты systemd исполняют
-#   стек напрямую). Живые вызовы: write_stack_files этого файла (до
-#   первого compose up) и cmd_autostart (юниты ссылаются на
-#   $STACK_DIR/hfctl).
-#
-# @returns integer # всегда 0 — отказы это die (exit 1) либо сбой
-#   mkdir/install/rm/cp под set -e (процесс завершается)
-sync_tree() {
-  # маркер — $STACK_DIR/hfctl: повторная установка из старого клона НЕ
-  # откатывает свежий стек (обновление — только install.sh, AGENTS правило 5).
-  [ -f "$STACK_DIR/hfctl" ] && return 0      # в стеке уже есть — НЕ трогать
-  [ "$SELF" = "$STACK_DIR/hfctl" ] && return 0   # запускаемся прямо из стека (юниты)
-  [ -d "$(dirname "$SELF")/lib" ] && [ -d "$(dirname "$SELF")/tpl" ] || \
-    die "дерево hfctl неполное: рядом нет lib/ и tpl/ — установи через git clone + ./install.sh"
-  mkdir -p "$STACK_DIR"
-  install -m 0755 "$SELF" "$STACK_DIR/hfctl"
-  rm -rf "${STACK_DIR:?}/lib" "${STACK_DIR:?}/tpl"
-  cp -a "$(dirname "$SELF")/lib"  "$STACK_DIR/lib"
-  cp -a "$(dirname "$SELF")/tpl"  "$STACK_DIR/tpl"
-}
-
-# Назначение: симлинк ~/.local/bin/hfctl → бинарь стека
-#   $STACK_DIR/hfctl (вариант 2: стек = истина, PATH-точка переживает
+# Назначение: симлинк ~/.local/bin/hfctl → бинарь клона
+#   $STACK_DIR/hfctl (лейаут v2: клон = стек; PATH-точка переживает
 #   переезды клона).
 #
 # Побочные эффекты: mkdir -p $HOME/.local/bin; ln -sfn ЗАМЕНОЙ перезаписывает
 #   симлинк $HOME/.local/bin/hfctl (существующая ссылка заменяется молча;
 #   сам файл-цель не трогается). В stdout не печатает.
 #
-# Ограничения/допущения: требует глобал STACK_DIR (диспетчер); порядок на
-#   вызывающем — после sync_tree (иначе ссылка ведёт в несуществующий
-#   путь: ln цель не проверяет). Сбой ln (например, на месте ссылки
-#   лежит обычный файл или каталог) завершает процесс через set -e.
+# Ограничения/допущения: требует глобал STACK_DIR (диспетчер); $STACK_DIR —
+#   каталог клона (существует по факту запуска диспетчера). Сбой ln
+#   (например, на месте ссылки лежит обычный файл или каталог) завершает
+#   процесс через set -e.
 #
 # @returns integer # всегда 0 при возврате — сбой ln завершает процесс set -e
 ensure_symlink() {
@@ -107,45 +70,44 @@ ensure_symlink() {
   ln -sfn "$STACK_DIR/hfctl" "$bin_dir/hfctl"
 }
 
-# Назначение: сгенерировать файлы стека в $STACK_DIR целиком — дерево hfctl
-#   (sync_tree + ensure_symlink), каталоги, каноническая compose-тройка
-#   и compose.local.yml с DFlash-wiring и prompts-маунтом. .env здесь НЕ
-#   пишется — это write_env ниже (её вызывает тот же install/use).
+# Назначение: сгенерировать файлы стека в $STACK_DIR — каркас .data,
+#   симлинк PATH-точки, каноническая compose-тройка и compose.local.yml с
+#   DFlash-wiring и prompts-маунтом. .env здесь НЕ пишется — это write_env
+#   ниже (её вызывает тот же bootstrap/use).
 #
 # Побочные эффекты: mkdir -p $STACK_DIR и $MODELS_DIR (маунт-каталог сета
-#   активного профиля); sync_tree (бинарь+lib+tpl в $STACK_DIR) и
+#   активного профиля — заодно каркас $DATA_DIR: .data/models/<сет>);
 #   ensure_symlink ($HOME/.local/bin/hfctl); install -m 0644 ПЕРЕЗАПИСЫВАЕТ
 #   $STACK_DIR/compose.yml и $STACK_DIR/compose.halo.yml дословными
 #   копиями tpl/compose/compose.yml и tpl/compose/compose.halo.yml;
 #   render_tpl ПЕРЕЗАПИСЫВАЕТ $STACK_DIR/compose.local.yml из
 #   tpl/compose/compose.local.yml.tpl. Все файлы — inode текущего юзера.
 #   Читает: шаблоны tpl/compose/, наличие каталога
-#   $STACK_DIR/benchmarks/prompts, профиль из ТЕКУЩЕГО .env (cur_profile →
+#   $DATA_DIR/benchmarks/prompts, профиль из ТЕКУЩЕГО .env (cur_profile →
 #   profile_field поле 3). В stdout — log-строка «стек в …».
 #
-# Ограничения/допущения: требует глобалы STACK_DIR, MODELS_DIR, TPL_DIR,
-#   DRAFT_FILE, log (диспетчер), cur_profile (stack.sh), profile_field
-#   (profiles.sh). Порядок: после set_models_dir (state-каталоги и сет
-#   моделей должны существовать до генерации) и ДО первого
+# Ограничения/допущения: требует глобалы STACK_DIR, DATA_DIR, MODELS_DIR,
+#   TPL_DIR, DRAFT_FILE, log (диспетчер), cur_profile (stack.sh),
+#   profile_field (profiles.sh). Порядок: после set_models_dir (state-каталоги
+#   и сет моделей должны существовать до генерации) и ДО первого
 #   `compose up`/recreate (podman-compose читает каноническую -f-тройку
 #   при каждом вызове); .env пишется вызывающим сразу после, до compose up.
 #   DFlash-строка выбирается по профилю ПРЕЖНЕГО .env (чистый стек →
-#   PROFILE_DEFAULT) и может отличаться от устанавливаемого install'ом;
+#   PROFILE_DEFAULT) и может отличаться от устанавливаемого bootstrap'ом;
 #   поле 3 — только маркер «есть draft», путь всегда глобал DRAFT_FILE
 #   (КОНТЕЙНЕРНЫЙ путь в маунт моделей). prompts-маунт появляется только
-#   если каталог уже лежит в стеке — hfctl фикстуры не раскладывает.
-#   Локалы prompt_vol/draft_env одной строкой: пустая строка или
-#   предформированный YAML-фрагмент (prompt_vol содержит переводы строк).
+#   если каталог уже лежит в .data/benchmarks/prompts (лаба создаёт сама) —
+#   hfctl фикстуры не раскладывает. CONTAINERS_CONF — tracked-файл клона
+#   tpl/etc/hfctl-containers.conf: копия не делается (этап 14), потребители
+#   читают tpl-путь напрямую. Локалы prompt_vol/draft_env одной строкой:
+#   пустая строка или предформированный YAML-фрагмент (prompt_vol содержит
+#   переводы строк).
 #
 # @returns integer # всегда 0 при возврате — die render_tpl (нераскрытые
 #   плейсхолдеры) и сбои mkdir/install завершает set -e
 write_stack_files() {
   log "стек в $STACK_DIR"
-  mkdir -p "$STACK_DIR" "$MODELS_DIR"
-  # бинарь живёт В СТЕКЕ (источник истины; юниты ссылаются на него).
-  # Копируем только при отсутствии (обновление — install.sh):
-  # перезапись здесь могла бы откатить свежий install.sh-бинарь старым.
-  sync_tree
+  mkdir -p "$STACK_DIR" "$MODELS_DIR"   # MODELS_DIR создаёт и каркас $DATA_DIR
   ensure_symlink
 
   # compose.yml — дословно из репозитория hipfire 0.4.5 (для 0.4.6 и 0.4.7
@@ -156,15 +118,11 @@ write_stack_files() {
   install -m 0644 "$TPL_DIR/compose/compose.yml" "$STACK_DIR/compose.yml"
   install -m 0644 "$TPL_DIR/compose/compose.halo.yml" "$STACK_DIR/compose.halo.yml"
 
-  # CONTAINERS_CONF стека (скоуп slirp4netns, §14): путь обновления
-  # существующих машин — install/use перезаписывают файл каноном из tpl/.
-  install -m 0644 "$TPL_DIR/etc/hfctl-containers.conf" "$STACK_DIR/.hfctl-containers.conf"   # fix:containers-conf
-
   # compose.local.yml: DFlash-wiring для профилей с draft (mq6-xt не объявляет
   # sidecar в реестре; MQ4 draft — рекомендованный контроллер). Профили без
   # draft (flash-multi: native MTP) получают пустой env = DFlash выключен.
   local prompt_vol="" draft_env=""
-  [ -d "$STACK_DIR/benchmarks/prompts" ] && prompt_vol=$'\n    volumes:\n      - ./benchmarks/prompts:/prompts:ro'
+  [ -d "$DATA_DIR/benchmarks/prompts" ] && prompt_vol=$'\n    volumes:\n      - ./.data/benchmarks/prompts:/prompts:ro'
   local cur_draft; cur_draft=$(profile_field "$(cur_profile)" 3)
   [ "$cur_draft" != "-" ] && [ -n "$cur_draft" ] && draft_env="      HIPFIRE_DFLASH_DRAFT: $DRAFT_FILE"
   render_tpl "$TPL_DIR/compose/compose.local.yml.tpl" "$STACK_DIR/compose.local.yml" \
@@ -188,7 +146,7 @@ write_stack_files() {
 # Ограничения/допущения: требует глобалы TPL_DIR, STACK_DIR, MODELS_DIR,
 #   STATE_BASE, IMAGE, BIND, PORT (диспетчер); MODELS_DIR берётся в момент
 #   вызова (его переставляют set_models_dir / env-префикс cmd_pull).
-#   Живые вызовы — cmd_install и cmd_use (после write_stack_files и
+#   Живые вызовы — cmd_bootstrap/cmd_on и cmd_use (после write_stack_files и
 #   ДО `compose up`/recreate: podman-compose читает HIPFIRE_* из .env) и
 #   откат в cmd_use при неподошедшем профиле — ЕДИНСТВЕННЫЙ вызов после
 #   compose, без recreate. Откат передаёт prev_prof=cur_profile и

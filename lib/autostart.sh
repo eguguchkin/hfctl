@@ -63,9 +63,9 @@ gpu_ready_or_die() {
 # Назначение: `hfctl up` (скрытый алиас): поднять стек, сняв явный маркер
 #   остановки, и дождаться готовности сервера.
 #
-# Побочные эффекты: rm -f маркера $STACK_DIR/.hfctl-stopped (отсутствие —
+# Побочные эффекты: rm -f маркера $DATA_DIR/.hfctl-stopped (отсутствие —
 #   беззвучно); через hf_up_locked — создание/усечение lock-файла
-#   $STACK_DIR/.hfctl.lock и `podman compose up -d` (контейнеры, подтяжка
+#   $DATA_DIR/.hfctl.lock и `podman compose up -d` (контейнеры, подтяжка
 #   образа, init-pull моделей); через wait_health (health.sh) — поллинг
 #   GET /health (curl/python3), log-строки и stdout до 300 байт тела
 #   /health; sleep по 5 с за итерацию ожидания.
@@ -86,13 +86,13 @@ cmd_up()   { rm -f "$STOP_MARKER"; hf_up_locked; wait_health 600; }
 # Назначение: единая реализация остановки стека — явный маркер остановки +
 #   `podman compose stop` (последние 2 строки вывода наружу).
 #
-# Побочные эффекты: mkdir -p $STACK_DIR; touch маркера
-#   $STACK_DIR/.hfctl-stopped (ДО stop — вотчдог оглушён даже при сбое
+# Побочные эффекты: mkdir -p $DATA_DIR; touch маркера
+#   $DATA_DIR/.hfctl-stopped (ДО stop — вотчдог оглушён даже при сбое
 #   остановки); `podman compose stop` — остановка контейнеров (тома, файлы
 #   стека и образ НЕ удаляются; stderr слит в stdout, хвост — последние 2
 #   строки).
 #
-# Ограничения/допущения: требует глобалы STACK_DIR, STOP_MARKER и CF
+# Ограничения/допущения: требует глобалы STOP_MARKER и CF
 #   (stack.sh). Заглушивание/печать — на совести вызывающего: cmd_down
 #   печатает вывод и терпит rc по set -e, cmd_off заглушает вывод и rc
 #   (`|| true`).
@@ -100,7 +100,7 @@ cmd_up()   { rm -f "$STOP_MARKER"; hf_up_locked; wait_health 600; }
 # @stdout string   # последние 2 строки `podman compose stop`
 # @returns integer # 0 — остановлен; ненулевой rc — сбой compose stop
 #   (pipefail пропускает его наружу, tail не привносит)
-stop_with_marker() { mkdir -p "$STACK_DIR"; touch "$STOP_MARKER"; compose stop 2>&1 | tail -2; }
+stop_with_marker() { mkdir -p "$DATA_DIR"; touch "$STOP_MARKER"; compose stop 2>&1 | tail -2; }
 
 # Назначение: `hfctl down` (скрытый алиас): ЯВНАЯ остановка стека — с
 #   маркером, чтобы вотчдог не поднял его обратно до следующего `hfctl up`.
@@ -118,21 +118,70 @@ stop_with_marker() { mkdir -p "$STACK_DIR"; touch "$STOP_MARKER"; compose stop 2
 #   compose stop (по set -e процесс завершается до сообщения)
 cmd_down() { stop_with_marker; echo "остановлен (контейнеры/файлы/образ целы; вотчдог молчит до 'hfctl up')"; }
 
-# Назначение: `hfctl on` (алиас `autostart`): включить автозапуск (юниты +
-#   таймер + linger) и поднять стек прямо сейчас.
+# Назначение: `hfctl on` — единая точка входа лейаута v2: на пустом клоне
+#   (нет .env) — полный bootstrap (cmd_bootstrap, §Б task 14.1); на
+#   развёрнутом стеке — как прежде: юниты+таймер+linger и поднять сейчас.
+#   Юниты ставятся ПОСЛЕДНИМИ (после health/smoke bootstrap'а — Р1: таймер
+#   вотчдога не должен тикать до первого здорового up, иначе первый тик
+#   встанет в flock и реклеймом убьёт сам bootstrap).
 #
-# Побочные эффекты: всё, что делают cmd_autostart (запись юнит-файлов в
-#   ~/.config/systemd/user/, systemctl daemon-reload/enable/start, linger,
-#   снятие маркера) и cmd_up (compose up -d, lock-файл, ожидание /health).
+# Побочные эффекты: разбор флагов (тот же набор, что у bootstrap: флаги
+#   мутирующие — --profile/--port/--bind/--models-dir — на развёрнутом
+#   стеке запрещены guard'ом). Ветка bootstrap: cmd_bootstrap с ОРИГИНАЛОМ
+#   аргументов (конвейер cmd_install 13.2 — preflight → .data → .env → pull
+#   → up → health → smoke). Ветка развёрнутого стека: guard'ы на
+#   флаги-мутаторы и --no-autostart → die с подсказкой ('use' / 'hfctl up');
+#   далее cmd_autostart (юниты+таймер+linger, снятие маркера) и cmd_up
+#   (compose up -d под lock'ом + wait_health 600). При --no-autostart в
+#   ветке bootstrap — печать подсказки и возврат без юнитов и без подъёма.
 #
-# Ограничения/допущения: порядок фиксирован — сначала cmd_autostart (юниты
-#   должны быть установлены до поднятия), затем cmd_up. Сбой cmd_autostart
-#   по set -e завершает процесс до поднятия стека. Требует все глобалы
-#   cmd_autostart и cmd_up.
+# Ограничения/допущения: признак «развёрнут» — наличие $STACK_DIR/.env
+#   (пишется write_env в конце файловой фазы bootstrap: оборванный
+#   bootstrap повторяется тем же `hfctl on` с теми же флагами). Guard
+#   «заданы» — по факту передачи флага (локал mut, ставится в разборе),
+#   поэтому срабатывает и при явном значении, равном дефолту. Требует
+#   глобалы STACK_DIR/PORT/BIND/MODELS_DIR (диспетчер) и cmd_bootstrap
+#   (commands.sh), cmd_autostart/cmd_up этого файла. Маркер при bootstrap
+#   не создаётся и не снимается веткой (снимут cmd_autostart/cmd_up после
+#   успеха). Локалы: prof/no_autostart/force — как в cmd_bootstrap; mut —
+#   '0' | '1'; args — массив оригинальных аргументов (парс съедает "$@").
 #
-# @returns integer # как у cmd_up: 0 — стек поднят и здоров; 1 — сбой
-#   wait_health (по set -e — выход процесса с этим rc)
-cmd_on()  { cmd_autostart; cmd_up; }
+# @param 1..N: string[] # флаги: --profile <алиас> | --port <целое> |
+#   --bind <адрес> | --models-dir <путь> | --no-autostart | --force | --yes
+#   (мутирующие и --no-autostart — только в ветке bootstrap)
+# @returns integer     # 0 при возврате (bootstrap либо автозапуск+подъём
+#   успешны; --no-autostart-ветка — 0 без подъёма); отказы — die (1),
+#   preflight (42), сбои шагов (set -e)
+cmd_on() {
+  local prof="" no_autostart=0 force=0 mut=0   # mut: задан ли флаг-мутатор
+  local args=("$@")   # оригинал аргументов: парс ниже съедает "$@", а bootstrap
+                      # разбирает флаги сам (повтор оборванного bootstrap —
+                      # теми же флагами, §Б)
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --profile)     prof="$2"; mut=1; shift 2 ;;
+      --port)        PORT="$2"; mut=1; shift 2 ;;
+      --bind)        BIND="$2"; mut=1; shift 2 ;;
+      --models-dir)  MODELS_DIR="$2"; mut=1; shift 2 ;;
+      --no-autostart) no_autostart=1; shift ;;
+      --force)       force=1; shift ;;
+      --yes)         ASSUME_YES=1; shift ;;
+      *) die "неизвестный флаг install: $1 (доступны: --profile ${PROFILE_LIST// /|} --port --bind --models-dir --no-autostart --force --yes)" ;;
+    esac
+  done
+  if [ ! -f "$STACK_DIR/.env" ]; then
+    cmd_bootstrap ${args[@]+"${args[@]}"}   # пустой клон: полный конвейер установки (§Б)
+  else
+    : # развёрнутый стек — только guard'ы, юниты+подъём без флагов-мутаторов
+    # guard: флаги-мутаторы на развёрнутом стеке меняет use, подъём без
+    # автозапуска — up
+    if [ "$mut" = 1 ]; then die "стек уже развёрнут; профиль/параметры меняет 'hfctl use <профиль>'"; fi   # fix:bootstrap-guard
+    if [ "$no_autostart" = 1 ]; then die "'on' — это автозапуск; поднять без него: 'hfctl up'"; fi   # fix:bootstrap-guard
+  fi
+  [ "$no_autostart" = 1 ] && { echo "(автозапуск не включён — '--no-autostart'; включить: hfctl on)"; return 0; }
+  cmd_autostart               # юниты+таймер+linger — ПОСЛЕДНИМИ (Р1)
+  cmd_up                      # rm маркера + hf_up_locked + wait_health 600
+}
 
 # Назначение: `hfctl off` (алиас `noautostart`): остановить стек и полностью
 #   снять автозапуск — юниты удалены, linger выключен; файлы/модели/образ
@@ -153,7 +202,7 @@ cmd_on()  { cmd_autostart; cmd_up; }
 # Ограничения/допущения: остановка стека идёт ДО удаления юнитов — oneshot-
 #   юнит контейнеры не держит (compose up -d отсоединён), ExecStop уже
 #   завершённого юнита не сработает. Требует глобалы UNIT_NAME, STOP_MARKER,
-#   STACK_DIR (диспетчер) и CF (stack.sh), stop_with_marker этого файла. Не
+#   DATA_DIR (диспетчер) и CF (stack.sh), stop_with_marker этого файла. Не
 #   заглушённые systemctl daemon-reload и sudo disable-linger при `hfctl off`
 #   по set -e завершают процесс своим rc (юниты к этому моменту уже удалены);
 #   вызов из cmd_uninstall (commands.sh) через `|| true` вешает set -e внутри
@@ -188,34 +237,33 @@ cmd_off() {
 #   (ExecStart = $STACK_DIR/hfctl _watchdog) и его минутный таймер; enable
 #   их и включить linger.
 #
-# Побочные эффекты: mkdir -p ~/.config/systemd/user; sync_tree
-#   (stack_files.sh — самокопия дерева в стек при первом включении);
-#   render_tpl записывает ~/.config/systemd/user/$UNIT_NAME.service (из
+# Побочные эффекты: mkdir -p ~/.config/systemd/user; render_tpl записывает
+#   ~/.config/systemd/user/$UNIT_NAME.service (из
 #   tpl/systemd/hipfire-compose.service.tpl с PODMAN_BIN=$(command -v
 #   podman), STACK_DIR и строкой CF-тройки) и …-watchdog.service (tpl,
-#   STACK_DIR); install -m 0644 копирует статичный tpl/etc/hfctl-
-#   containers.conf → $STACK_DIR/.hfctl-containers.conf (строго ДО рендера
-#   юнитов — инвариант «юниты рендерятся только при наличии файла», §14);
+#   STACK_DIR; Environment=CONTAINERS_CONF указывает в tracked-файл клона
+#   tpl/etc/hfctl-containers.conf — лейаут v2, производной копии нет);
 #   install -m 0644 копирует статичный
 #   tpl/systemd/hipfire-compose-watchdog.timer.tpl → …-watchdog.timer;
 #   systemctl --user daemon-reload, enable ($UNIT_NAME.service +
 #   $UNIT_NAME-watchdog.timer), start таймера; rm -f маркера
-#   $STACK_DIR/.hfctl-stopped; sudo loginctl enable-linger $USER; строка
+#   $DATA_DIR/.hfctl-stopped; sudo loginctl enable-linger $USER; строка
 #   итога в stdout.
 #
 # Ограничения/допущения: юниты рендерятся из tpl/systemd/ через render_tpl
-#   (die при нераскрытых плейсхолдерах) и исполняют $STACK_DIR/hfctl —
-#   поэтому sync_tree строго до рендера; к моменту enable compose-тройка и
-#   .env уже должны лежать в $STACK_DIR (install/use пишут их раньше).
-#   enable ≠ немедленный пуск compose-сервиса: он стартует при boot (или
-#   cmd_up поднимает стек сейчас), таймер же активен сразу (первый тик
-#   OnBootSec=2min). Локалы одной строкой: unit_dir — фиксированный путь
-#   ~/.config/systemd/user; bin — абсолютный путь podman (command -v).
-#   Требует глобалы UNIT_NAME, STACK_DIR, TPL_DIR, HOME (диспетчер), CF
-#   (stack.sh), рендер-хелперы sync_tree/render_tpl и die. По set -e сбой
-#   любого незащищённого шага (mkdir/render_tpl-die/systemctl/sudo)
-#   завершает процесс. Живые вызовы: cmd_on этого файла и cmd_install
-#   (commands.sh, без --no-autostart).
+#   (die при нераскрытых плейсхолдерах) и исполняют $STACK_DIR/hfctl — в
+#   лейауте v2 клон = стек, бинарь и дерево рядом с ним существуют по
+#   факту запуска (sync_tree упразднён этапом 14); к моменту enable
+#   compose-тройка и .env уже должны лежать в $STACK_DIR (bootstrap/cmd_use
+#   пишут их раньше). enable ≠ немедленный пуск compose-сервиса: он стартует
+#   при boot (или cmd_up поднимает стек сейчас), таймер же активен сразу
+#   (первый тик OnBootSec=2min). Живой вызов: cmd_on этого файла (после
+#   успешного bootstrap или на развёрнутом стеке). Локалы одной строкой:
+#   unit_dir — фиксированный путь ~/.config/systemd/user; bin — абсолютный
+#   путь podman (command -v). Требует глобалы UNIT_NAME, STACK_DIR, DATA_DIR,
+#   TPL_DIR, HOME (диспетчер), CF (stack.sh), рендер-хелпер render_tpl и
+#   die. По set -e сбой любого незащищённого шага (mkdir/render_tpl-die/
+#   systemctl/sudo) завершает процесс.
 #
 # @stdout string   # строка «автозапуск ВКЛ (unit + watchdog-таймер 1м,
 #   linger=yes)»
@@ -225,11 +273,6 @@ cmd_autostart() {
   local unit_dir="$HOME/.config/systemd/user" bin
   bin="$(command -v podman)"
   mkdir -p "$unit_dir"
-  # юниты ссылаются на $STACK_DIR/hfctl — убедимся, что копия на месте
-  sync_tree
-  # CONTAINERS_CONF стека (скоуп slirp4netns, §14) — файл обязан существовать
-  # К моменту рендера юнитов: юнит-шаблоны ссылаются на него через Environment.
-  install -m 0644 "$TPL_DIR/etc/hfctl-containers.conf" "$STACK_DIR/.hfctl-containers.conf"   # fix:containers-conf
   render_tpl "$TPL_DIR/systemd/hipfire-compose.service.tpl" "$unit_dir/$UNIT_NAME.service" \
     PODMAN_BIN="$bin" STACK_DIR="$STACK_DIR" CF="${CF[*]}"
   # вотчдог крашей: rootless podman не оставляет живого наблюдателя после
@@ -284,7 +327,7 @@ hf_orphan_heal() {
   log "storage-сирота $id удалена (external entity) — повторяю up"
 }
 
-# Назначение: реклейм зависших держателей $STACK_DIR/.hfctl.lock — при неудаче
+# Назначение: реклейм зависших держателей $DATA_DIR/.hfctl.lock — при неудаче
 #   первого `flock -n` (up/_boot/_watchdog голодали на SIGKILL-выживших,
 #   GOTCHAS окна 2026-11-21): идентифицировать держателей (fuser), убить
 #   kill -9 только если держатель старше LOCK_STALE_SECS И его cmdline
@@ -306,7 +349,7 @@ hf_orphan_heal() {
 #   глушены; решение «реклейм не удался» принимает вызывающий вторым flock -n
 hf_lock_reclaim() {
   local pids p age args
-  pids=$(fuser "$STACK_DIR/.hfctl.lock" 2>/dev/null) || return 0
+  pids=$(fuser "$DATA_DIR/.hfctl.lock" 2>/dev/null) || return 0
   # нет fuser — пробуем lsof; нет ни того ни другого → тихая деградация
   for p in $pids; do
     kill -0 "$p" 2>/dev/null || continue
@@ -347,7 +390,7 @@ hf_pod_pristine() {
 #   в выводе up (уже running-контейнер ≠ и сигнатура «external entity») —
 #   hf_orphan_heal + один retry up (максимум ДВЕ попытки up на вызов).
 #
-# Побочные эффекты: создание/усечение lock-файла $STACK_DIR/.hfctl.lock
+# Побочные эффекты: создание/усечение lock-файла $DATA_DIR/.hfctl.lock
 #   (перенаправление fd 9 в субшелле) с неблокирующим flock, отпускаемым
 #   по выходе субшелла; при занятом локе — hf_lock_reclaim (kill -9 зрелых
 #   podman/hfctl-держателей); hf_pod_pristine (возможный podman pod rm -f
@@ -382,7 +425,7 @@ hf_up_locked() {
     if [ -n "$out" ]; then printf '%s\n' "$out" | tail -2; fi
     [ "$(podman inspect -f '{{.State.Status}}' "$CONTAINER" 2>/dev/null)" = running ] || { hf_orphan_heal "$out" && { rc=0; out=$(compose up -d 2>&1) || rc=$?; if [ -n "$out" ]; then printf '%s\n' "$out" | tail -2; fi; }; }   # fix:orphan-heal
     return "$rc"
-  ) 9>"$STACK_DIR/.hfctl.lock"
+  ) 9>"$DATA_DIR/.hfctl.lock"
 }
 
 # Назначение: `compose up -d` под неблокирующим lock'ом с авто-лечением
@@ -399,7 +442,7 @@ hf_up_locked() {
 #   чистый storage. Максимум ДВЕ попытки up на вызов. До первого up —
 #   hf_lock_reclaim при занятом локе и hf_pod_pristine.
 #
-# Побочные эффекты: создание/усечение lock-файла $STACK_DIR/.hfctl.lock
+# Побочные эффекты: создание/усечение lock-файла $DATA_DIR/.hfctl.lock
 #   (неблокирующий flock, отпускается субшеллом; при занятом — реклейм
 #   зрелых держателей); hf_pod_pristine (возможный podman pod rm -f
 #   pod_hipfire); до двух `compose up -d` (в stdout — последние 2 строки
@@ -448,7 +491,7 @@ hf_up_devsafe() {
       fi
     fi
     [ "$(podman inspect -f '{{.State.Status}}' "$CONTAINER" 2>/dev/null)" = running ]
-  ) 9>"$STACK_DIR/.hfctl.lock"
+  ) 9>"$DATA_DIR/.hfctl.lock"
 }
 
 # Назначение: внутренняя команда `_boot` загрузочного юнита
@@ -514,12 +557,12 @@ cmd_boot() {
 #   контейнер с запечатанной старой нумерацией /dev/dri до следующего
 #   ребута).
 #
-# Побочные эффекты: чтение маркера $STACK_DIR/.hfctl-stopped, состояния
+# Побочные эффекты: чтение маркера $DATA_DIR/.hfctl-stopped, состояния
 #   контейнера (podman inspect) и GPU-нод (gpu_present); при неготовом GPU —
 #   тихий немедленный выход (ранний тик таймера после boot: up при
 #   полупустом /dev/dri запечатал бы неполный снэпшот в свежий контейнер);
 #   при необходимости — дописывание строки с ISO-временем в
-#   $STACK_DIR/.hfctl-watchdog.log (stderr заглушён, сбой дописи глушится
+#   $DATA_DIR/.hfctl-watchdog.log (stderr заглушён, сбой дописи глушится
 #   `|| true`) и hf_up_devsafe (lock-файл + до двух compose up + возможный
 #   rm, rc заглушён `|| true`).
 #
@@ -543,7 +586,7 @@ cmd_watchdog() {
   local st
   st=$(podman inspect -f '{{.State.Status}}' "$CONTAINER" 2>/dev/null || echo missing)
   if [ "$st" != running ]; then
-    echo "$(date -Is) watchdog: container state=$st -> up" >> "$STACK_DIR/.hfctl-watchdog.log" 2>/dev/null || true
+    echo "$(date -Is) watchdog: container state=$st -> up" >> "$DATA_DIR/.hfctl-watchdog.log" 2>/dev/null || true
     hf_up_devsafe || true
   fi
 }

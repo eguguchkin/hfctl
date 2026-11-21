@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # run_checks.sh — internal-check батарея сабстэджа 13.1 (самолечение аномалий,
 # фиксы Ф1–Ф5) + 13.2 (preflight: apt-пятёрка + GPU-подготовка, P-A…P-H) +
-# AGENTS-четыре. Прецеденты: gfctl tests/run_checks.sh (faux-bin
+# 14.1 (лейаут v2: bootstrap первого on, uninstall v2, роутер, .data-пути,
+# N1–N9) + AGENTS-четыре. Прецеденты: gfctl tests/run_checks.sh (faux-bin
 # PATH-заглушки с журналом вызовов, harness-субшелл «глобалы диспетчера +
 # source lib + faux-PATH + eval») и .dev/tasks/defects/boot-device-mismatch/
 # selfcheck.sh (GPU-гейт через env-крючки шапки autostart.sh).
@@ -39,7 +40,7 @@ TMP="$(mktemp -d "${TMPDIR:-/tmp}/hfctl-checks.XXXXXX")" || { echo "run_checks: 
 trap '[ -n "${TMP:-}" ] && rm -rf "$TMP"' EXIT
 # подмена /etc/os-release внутри namespace (продукт читает абсолютный путь)
 if [ "${HF_CHECKS_UNSHARED:-0}" = 1 ]; then
-  printf 'ID=ubuntu\nVERSION_ID="24.04"\n' > "$TMP/fake-os-release"
+  printf 'ID=ubuntu\nVERSION_ID="24.04"\nPRETTY_NAME="Ubuntu 24.04 LTS"\n' > "$TMP/fake-os-release"
   mount -o bind "$TMP/fake-os-release" /etc/os-release 2>/dev/null || true
 fi
 PASS=0 FAIL=0
@@ -198,6 +199,20 @@ cat > "$FAUX_FULL/$b" <<EOF
 exit 0
 EOF
 done
+# curl в FAUX_FULL — с живыми ответами: /health → ok-JSON (wait_health,
+# route_snapshot), /v1/chat/completions → chat-JSON (smoke); прочие вызовы —
+# пусто, rc 0. N-сценарии 14.1 гоняют полный bootstrap на этих ответах.
+cat > "$FAUX_FULL/curl" <<'EOF'
+#!/usr/bin/env bash
+{ printf 'curl'; printf ' %s' "$@"; printf '\n'; } >> "${HFCTL_FAUX_LOG:?}"
+for a in "$@"; do
+  case "$a" in
+    http://*/health) printf '{"status":"ok","model":"qwen3.8:27b-mq4-xts"}'; exit 0 ;;
+    http://*/v1/chat/completions) printf '{"choices":[{"message":{"content":"ок"}}]}'; exit 0 ;;
+  esac
+done
+exit 0
+EOF
 chmod +x "$FAUX_FULL"/*
 # STRIPPED: базовые утилиты + mktemp/cmp/install БЕЗ podman/podman-compose/
 #   containers-storage/fuser/curl — P-A «всё отсутствует» (apt-пятёрка целиком);
@@ -222,7 +237,8 @@ done
 ln -sf "$FAUX/podman" "$NOFU/podman"
 
 # ── hf — harness: субшелл с глобалами диспетчера + source lib + faux-PATH ────
-# (прецедент gfctl; дерево под тестом — HF_TREE, по умолчанию репо).
+# (прецедент gfctl; дерево под тестом — HF_TREE, по умолчанию репо; source —
+# в порядке диспетчера: N-сценарии 14.1 зовут cmd_on/cmd_bootstrap/cmd_uninstall).
 HF_STACK="$TMP/stack"
 hf() {  # hf <bash-код> — stdout+stderr и rc наружу
   local tree="${HF_TREE:-$ROOT}"
@@ -232,10 +248,10 @@ hf() {  # hf <bash-код> — stdout+stderr и rc наружу
     export HFCTL_FAUX_LOG="$FAUXLOG" HFCTL_FAUX_CNT="$FAUXCNT" HFCTL_FAUX_ORPHAN_ID="$ORPHAN_ID"
     export HOME="$TMP/home" USER="tester" HFCTL_FAUX_TMP="$TMP"
     IMAGE="ghcr.io/warpfront/hipfire:0.4.7"
-    STACK_DIR="$HF_STACK" MODELS_BASE="$HF_STACK/models" MODELS_DIR="$HF_STACK/models/27b"
-    STATE_BASE="$HF_STACK/profiles" PORT=11435 BIND="0.0.0.0" SLOTS=2 MAX_SEQ=262144 MEMLOCK="${HF_MEMLOCK:-1318060032}"
+    STACK_DIR="$HF_STACK" DATA_DIR="$HF_STACK/.data" MODELS_BASE="$HF_STACK/.data/models" MODELS_DIR="$HF_STACK/.data/models/27b"
+    STATE_BASE="$HF_STACK/.data/profiles" PORT=11435 BIND="0.0.0.0" SLOTS=2 MAX_SEQ=262144 MEMLOCK="${HF_MEMLOCK:-1318060032}"
     DRAFT_FILE="/home/hipfire/.hipfire/models/qwen38-27b-dflash-mq4.hfq"
-    STOP_MARKER="$HF_STACK/.hfctl-stopped"
+    STOP_MARKER="$HF_STACK/.data/.hfctl-stopped"
     CONTAINER="hipfire_hipfire_1" UNIT_NAME="hipfire-compose"
     ASSUME_YES=1 SELF="$tree/hfctl" LIB_DIR="$tree/lib" TPL_DIR="$tree/tpl"
     log()  { printf '\n== %s\n' "$*"; }
@@ -245,14 +261,19 @@ hf() {  # hf <bash-код> — stdout+stderr и rc наружу
     isint() { case "$1" in ''|*[!0-9]*) return 1 ;; *) return 0 ;; esac; }
     source "$LIB_DIR/profiles.sh"
     source "$LIB_DIR/stack.sh"
+    source "$LIB_DIR/state.sh"
     source "$LIB_DIR/stack_files.sh"
+    source "$LIB_DIR/engine.sh"
+    source "$LIB_DIR/health.sh"
+    source "$LIB_DIR/models.sh"
+    source "$LIB_DIR/commands.sh"
     source "$LIB_DIR/autostart.sh"
     eval "$1"
   )
 }
 
 # ── швы сценариев ────────────────────────────────────────────────────────────
-new_stack() { HF_STACK="$TMP/stack-$1"; rm -rf "$HF_STACK"; mkdir -p "$HF_STACK"; }
+new_stack() { HF_STACK="$TMP/stack-$1"; rm -rf "$HF_STACK"; mkdir -p "$HF_STACK/.data"; }
 fresh_log() { : > "$FAUXLOG"; rm -f "$FAUXCNT"* 2>/dev/null || true; }
 ups_count()     { local n; n=$(grep -c 'up -d' "$FAUXLOG" 2>/dev/null); echo "${n:-0}"; }
 deletes_count() { local n; n=$(grep -c 'containers-storage delete-container' "$FAUXLOG" 2>/dev/null); echo "${n:-0}"; }
@@ -360,7 +381,7 @@ scen_f2_guard() {
 # up прошёл, «пропуска» нет
 scen_f3_stale() {
   new_stack f3stale; fresh_log
-  local lock="$HF_STACK/.hfctl.lock" hp out rc
+  local lock="$HF_STACK/.data/.hfctl.lock" hp out rc
   hp=$(spawn_holder "$lock")
   sleep 2
   is_dead "$hp" && { echo "holder не дожил до сценария"; return 1; }
@@ -374,7 +395,7 @@ scen_f3_stale() {
 # Ф3 fresh: здоровый параллельный holder (моложе порога) НЕ тронут — «пропуск»
 scen_f3_fresh() {
   new_stack f3fresh; fresh_log
-  local lock="$HF_STACK/.hfctl.lock" hp out rc
+  local lock="$HF_STACK/.data/.hfctl.lock" hp out rc
   hp=$(spawn_holder "$lock")
   sleep 2
   lock_is_held "$lock" || { echo "holder не держит лок (сценарий пустой)"; return 1; }
@@ -387,7 +408,7 @@ scen_f3_fresh() {
 # Ф3 нет fuser в PATH: тихая деградация к прежнему поведению (skip, без kill)
 scen_f3_nofuser() {
   new_stack f3nofu; fresh_log
-  local lock="$HF_STACK/.hfctl.lock" hp out rc
+  local lock="$HF_STACK/.data/.hfctl.lock" hp out rc
   hp=$(spawn_holder "$lock")
   sleep 2
   lock_is_held "$lock" || { echo "holder не держит лок (сценарий пустой)"; return 1; }
@@ -425,26 +446,29 @@ scen_f4_absent() {
   ! grep -q 'podman pod rm -f pod_hipfire' "$FAUXLOG" && [ "$(ups_count)" = 1 ] && [ "$rc" = 0 ]
 }
 
-# Ф5 доставка: conf на месте и юниты отрендерены с Environment (cmd_autostart)
+# Ф5 доставка (лейаут v2): conf — tracked-файл клона tpl/etc (копии нет),
+#     юниты отрендерены с Environment на tpl-путь (cmd_autostart)
 scen_f5_deliver() {
   new_stack f5deliver; fresh_log
   rm -rf "$TMP/home"; mkdir -p "$TMP/home"
-  local rc
+  local rc tree="${HF_TREE:-$ROOT}"
   hf 'cmd_autostart' >/dev/null 2>&1; rc=$?
   [ "$rc" = 0 ] \
-    && [ -f "$HF_STACK/.hfctl-containers.conf" ] \
-    && grep -q 'Environment=CONTAINERS_CONF=' "$TMP/home/.config/systemd/user/hipfire-compose.service" \
-    && grep -q 'Environment=CONTAINERS_CONF=' "$TMP/home/.config/systemd/user/hipfire-compose-watchdog.service"
+    && [ -f "$tree/tpl/etc/hfctl-containers.conf" ] \
+    && grep -q "Environment=CONTAINERS_CONF=$HF_STACK/tpl/etc/hfctl-containers.conf" "$TMP/home/.config/systemd/user/hipfire-compose.service" \
+    && grep -q "Environment=CONTAINERS_CONF=$HF_STACK/tpl/etc/hfctl-containers.conf" "$TMP/home/.config/systemd/user/hipfire-compose-watchdog.service"
 }
 
-# Ф5 env-контракт compose(): файл есть → env выставлен; файла нет → env чист
+# Ф5 env-контракт compose(): tracked-файл на месте (в v2 клон = стек — зеркалим
+#     tpl в фейковый стек) → env выставлен; кривое дерево (tpl-файла нет) → env чист
 scen_f5_env() {
+  local tree="${HF_TREE:-$ROOT}"
   new_stack f5env; fresh_log
+  mkdir -p "$HF_STACK/tpl/etc"; cp -a "$tree/tpl/etc/hfctl-containers.conf" "$HF_STACK/tpl/etc/" || return 1
   hf 'write_stack_files' >/dev/null 2>&1 || return 1
-  [ -f "$HF_STACK/.hfctl-containers.conf" ] || return 1
   fresh_log
   hf 'hf_up_locked' >/dev/null 2>&1 || return 1
-  grep -qF "env CONTAINERS_CONF=$HF_STACK/.hfctl-containers.conf" "$FAUXLOG" || return 1
+  grep -qF "env CONTAINERS_CONF=$HF_STACK/tpl/etc/hfctl-containers.conf" "$FAUXLOG" || return 1
   new_stack f5noconf; fresh_log
   hf 'hf_up_locked' >/dev/null 2>&1 || return 1
   grep -q 'env CONTAINERS_CONF=UNSET' "$FAUXLOG" || return 1
@@ -572,10 +596,199 @@ scen_p_h() {
   [ "$rc" = 0 ] && [ "${n_bad:-0}" = 0 ]
 }
 
-# инвентарь маркеров: 9 имён на месте, счёт по локациям верный
+# ── 14.1: лейаут v2 — bootstrap первого on, uninstall v2, роутер (N1–N9) ─────
+# Хуки preflight (как в P-сценариях): HFCTL_LIMITS — файл, заранее равный
+#   рендеру (gpu_prep без записи и без exit 42), HFCTL_KFD/HFCTL_DRI —
+#   существующие пути, HFCTL_FAUX_LINGER=1 (preflight без sudo-мутаций).
+#   PATH — FAUX_FULL: podman-пятёрка на месте + curl с живыми ответами
+#   (/health ok-JSON, /v1/chat/completions chat-JSON) — wait_health/smoke
+#   проходят без сети и без реального сервера.
+
+# N1 bootstrap-happy: первый `on` на пустом клоне — конвейер §Б по порядку,
+#     юниты ПОСЛЕДНИМИ (Р1: enable после smoke/check_route), маркер снят
+scen_n1_bootstrap() {
+  new_stack n1; fresh_log
+  rm -rf "$TMP/home"; mkdir -p "$TMP/home"
+  local lim="$TMP/limits-n1.conf"
+  limits_bytes tester 1318060032 > "$lim"
+  local out rc en recreate smoke_ln logs_ln
+  out=$(HFCTL_LIMITS="$lim" HFCTL_KFD="$TMP/kfd-node" HFCTL_DRI="$TMP/dri-node" \
+    HFCTL_FAUX_LINGER=1 HF_PATH="$FAUX_FULL:$PATH" \
+    hf 'cmd_on --yes --force' 2>&1); rc=$?
+  en=$(grep -n 'systemctl --user enable' "$FAUXLOG" | head -1 | cut -d: -f1)
+  recreate=$(grep -n 'up -d --force-recreate' "$FAUXLOG" | head -1 | cut -d: -f1)
+  smoke_ln=$(grep -n 'chat/completions' "$FAUXLOG" | tail -1 | cut -d: -f1)
+  logs_ln=$(grep -n 'podman logs' "$FAUXLOG" | tail -1 | cut -d: -f1)
+  [ "$rc" = 0 ] \
+    && printf '%s' "$out" | grep -q 'SMOKE: OK' \
+    && printf '%s' "$out" | grep -q 'HEALTHY' \
+    && printf '%s' "$out" | grep -q 'автозапуск ВКЛ' \
+    && [ -n "$en" ] && [ -n "$recreate" ] && [ -n "$smoke_ln" ] && [ -n "$logs_ln" ] \
+    && [ "$recreate" -lt "$en" ] && [ "$smoke_ln" -lt "$en" ] && [ "$logs_ln" -lt "$en" ] \
+    && [ "$(ups_count)" = 3 ] \
+    && [ ! -e "$HF_STACK/.data/.hfctl-stopped" ] \
+    && [ -f "$HF_STACK/.env" ] \
+    && [ -f "$HF_STACK/compose.yml" ] && [ -f "$HF_STACK/compose.local.yml" ] \
+    && [ -d "$HF_STACK/.data/models/27b" ] \
+    && [ -L "$TMP/home/.local/bin/hfctl" ] \
+    && grep -q "Environment=CONTAINERS_CONF=$HF_STACK/tpl/etc/hfctl-containers.conf" "$TMP/home/.config/systemd/user/hipfire-compose.service" \
+    && grep -qF "HIPFIRE_MODELS_PATH=$HF_STACK/.data/models/27b" "$HF_STACK/.env" \
+    && grep -qF "HIPFIRE_STATE_DIR=$HF_STACK/.data/profiles/27b-single" "$HF_STACK/.env"
+}
+
+# N2 bootstrap-idempotent: второй `on` на развёрнутом стеке — БЕЗ конвейера
+#     (журнал без apt/usermod/sudo-install и без podman run), юниты+up
+scen_n2_idempotent() {
+  new_stack n2; fresh_log
+  hf 'set_models_dir 27b-single; write_stack_files; write_env 27b-single "$(profile_field 27b-single 1)"' >/dev/null 2>&1 || return 1
+  fresh_log
+  local out rc
+  out=$(HF_PATH="$FAUX_FULL:$PATH" hf 'cmd_on' 2>&1); rc=$?
+  [ "$rc" = 0 ] \
+    && ! grep -qE 'apt-get|usermod|sudo install' "$FAUXLOG" \
+    && ! grep -q 'podman run' "$FAUXLOG" \
+    && printf '%s' "$out" | grep -q 'автозапуск ВКЛ' \
+    && [ "$(ups_count)" = 1 ]
+}
+
+# N3 on-мутаторы-guard: на развёрнутом стеке --profile и --no-autostart →
+#     die с подсказкой ('use' / 'hfctl up'), ноль действий в журнале
+scen_n3_guard() {
+  new_stack n3; fresh_log
+  hf 'write_env 27b-single "$(profile_field 27b-single 1)"' >/dev/null 2>&1 || return 1
+  fresh_log
+  local out1 rc1 out2 rc2
+  out1=$(HF_PATH="$FAUX_FULL:$PATH" hf 'cmd_on --profile flash-multi' 2>&1); rc1=$?
+  out2=$(HF_PATH="$FAUX_FULL:$PATH" hf 'cmd_on --no-autostart' 2>&1); rc2=$?
+  [ "$rc1" != 0 ] && printf '%s' "$out1" | grep -q "меняет 'hfctl use <профиль>'" \
+    && [ "$rc2" != 0 ] && printf '%s' "$out2" | grep -q "поднять без него: 'hfctl up'" \
+    && [ "$(ups_count)" = 0 ] && ! grep -q 'systemctl --user enable' "$FAUXLOG"
+}
+
+# N4 bootstrap с готовым .data/models (мигра-сценарий §М): mv-переезд —
+#     maунт podman run указывает в .data/models/27b, файлы на месте не
+#     снесены, pull образа пропущен (image exists), .env — пути .data
+scen_n4_prepopulated() {
+  new_stack n4; fresh_log
+  mkdir -p "$HF_STACK/.data/models/27b" "$HF_STACK/.data/profiles/27b-single/config"
+  printf 'dummy-model-bytes' > "$HF_STACK/.data/models/27b/qwen38-27b-mq4-xts.safetensors"
+  local lim="$TMP/limits-n4.conf"
+  limits_bytes tester 1318060032 > "$lim"
+  local out rc
+  out=$(HFCTL_LIMITS="$lim" HFCTL_KFD="$TMP/kfd-node" HFCTL_DRI="$TMP/dri-node" \
+    HFCTL_FAUX_LINGER=1 HF_PATH="$FAUX_FULL:$PATH" \
+    hf 'cmd_on --yes --force' 2>&1); rc=$?
+  [ "$rc" = 0 ] \
+    && ! grep -q 'podman pull' "$FAUXLOG" \
+    && grep -qF -- "-v $HF_STACK/.data/models/27b:/home/hipfire/.hipfire/models" "$FAUXLOG" \
+    && [ -f "$HF_STACK/.data/models/27b/qwen38-27b-mq4-xts.safetensors" ] \
+    && grep -qF "HIPFIRE_STATE_DIR=$HF_STACK/.data/profiles/27b-single" "$HF_STACK/.env"
+}
+
+# N5 uninstall-v2-щадящий: юниты/linger/limits.d/compose down сняты;
+#     клон (.env, compose.yml) и .data (модели, профили) ЦЕЛЫ; без purge —
+#     ни rmi, ни rm моделей
+scen_n5_uninstall() {
+  new_stack n5; fresh_log
+  hf 'set_models_dir 27b-single; write_stack_files; write_env 27b-single "$(profile_field 27b-single 1)"' >/dev/null 2>&1 || return 1
+  mkdir -p "$HF_STACK/.data/models/27b"; printf x > "$HF_STACK/.data/models/27b/keep-me.bin"
+  local out rc
+  out=$(HF_PATH="$FAUX_FULL:$PATH" hf 'cmd_uninstall --yes' 2>&1); rc=$?
+  [ "$rc" = 0 ] \
+    && grep -qE 'compose .* down' "$FAUXLOG" \
+    && { [ ! -f /etc/security/limits.d/99-hipfire-memlock.conf ] \
+         || grep -qF 'rm -f /etc/security/limits.d/99-hipfire-memlock.conf' "$FAUXLOG"; } \
+    && grep -q 'disable-linger' "$FAUXLOG" \
+    && grep -q 'systemctl --user disable' "$FAUXLOG" \
+    && [ -f "$HF_STACK/.data/models/27b/keep-me.bin" ] \
+    && [ -f "$HF_STACK/.env" ] && [ -f "$HF_STACK/compose.yml" ] \
+    && ! grep -q 'podman rmi' "$FAUXLOG" \
+    && printf '%s' "$out" | grep -q 'uninstall DONE'
+}
+
+# N6 uninstall purge-флаги: --purge-models → .data/models удалена (profiles
+#     целы), --purge-image → podman rmi в журнале
+scen_n6_purge() {
+  new_stack n6; fresh_log
+  hf 'set_models_dir 27b-single; write_stack_files; write_env 27b-single "$(profile_field 27b-single 1)"' >/dev/null 2>&1 || return 1
+  mkdir -p "$HF_STACK/.data/models/27b" "$HF_STACK/.data/profiles/27b-single/config"
+  local out rc
+  out=$(HF_PATH="$FAUX_FULL:$PATH" hf 'cmd_uninstall --purge-models --purge-image --yes' 2>&1); rc=$?
+  [ "$rc" = 0 ] \
+    && [ ! -e "$HF_STACK/.data/models" ] \
+    && [ -d "$HF_STACK/.data/profiles" ] \
+    && grep -qF 'podman rmi ghcr.io/warpfront/hipfire:0.4.7' "$FAUXLOG" \
+    && printf '%s' "$out" | grep -q 'модели удалены' \
+    && printf '%s' "$out" | grep -q 'образ удалён'
+}
+
+# N7 статика лейаута (.gitignore, .data-глобалы диспетчера, lock×3 в .data,
+#     tpl-путь conf, bench OUT, sync_tree нет) + запуск из подкаталога клона
+#     (STACK_DIR = dirname диспетчера, cwd не читается — doctor видит .env
+#     именно клона)
+scen_n7_layout_statics() {
+  local tree="${HF_TREE:-$ROOT}"
+  grep -qx '.data/' "$ROOT/.gitignore" && grep -qx '.env' "$ROOT/.gitignore" \
+    && grep -qF 'STACK_DIR="${HFCTL_DIR:-$(dirname "$SELF")}"' "$tree/hfctl" \
+    && grep -qF 'DATA_DIR="$STACK_DIR/.data"' "$tree/hfctl" \
+    && grep -qF 'MODELS_BASE="${HFCTL_MODELS:-$DATA_DIR/models}"' "$tree/hfctl" \
+    && grep -qF 'STATE_BASE="${HFCTL_STATE:-$DATA_DIR/profiles}"' "$tree/hfctl" \
+    && grep -qF 'STOP_MARKER="$DATA_DIR/.hfctl-stopped"' "$tree/hfctl" \
+    && [ "$(grep -cF '$STACK_DIR/.hfctl.lock' "$tree/lib/autostart.sh")" = 0 ] \
+    && [ "$(grep -cF '$DATA_DIR/.hfctl.lock' "$tree/lib/autostart.sh")" = 7 ] \
+    && grep -qF 'OUT="${out_dir:-$DATA_DIR/bench-runs}"' "$tree/lib/bench.sh" \
+    && grep -qF '$STACK_DIR/tpl/etc/hfctl-containers.conf' "$tree/lib/stack.sh" \
+    && grep -qF '$DATA_DIR/.hfctl-watchdog.log' "$tree/lib/autostart.sh" \
+    && ! grep -q 'sync_tree' "$tree/lib/stack_files.sh" \
+    && [ ! -e "$tree/install.sh" ] || return 1
+  local sub="$TMP/subtree" dout
+  rm -rf "$sub"; mkdir -p "$sub"
+  cp -a "$tree/hfctl" "$tree/lib" "$tree/tpl" "$sub/" || return 1
+  dout=$(cd "$sub/lib" && env PATH="$FAUX_FULL:$PATH" HOME="$TMP/home" USER=tester \
+    HFCTL_FAUX_LOG="$FAUXLOG" HFCTL_FAUX_CNT="$FAUXCNT" HFCTL_FAUX_ORPHAN_ID="$ORPHAN_ID" \
+    HFCTL_FAUX_TMP="$TMP" bash "$sub/hfctl" doctor 2>&1)
+  printf '%s' "$dout" | grep -qF "НЕ УСТАНОВЛЕН ($sub/.env нет)" \
+    && printf '%s' "$dout" | grep -q "сначала 'hfctl on'"
+}
+
+# N8 роутер install→cmd_on: строка роутера на месте + поведение — `hfctl
+#     install` (реальный диспетчер, faux-PATH) даёт журнал N1: bootstrap
+#     до SMOKE, юниты отрендерены с tpl-conf, .env записан
+scen_n8_router_install() {
+  grep -Eq '^  install\) +cmd_on "\$\@" ;;' "$ROOT/hfctl" || return 1
+  new_stack n8; fresh_log
+  rm -rf "$TMP/home"; mkdir -p "$TMP/home"
+  local lim="$TMP/limits-n8.conf"
+  limits_bytes tester 1318060032 > "$lim"
+  local out rc
+  out=$(env PATH="$FAUX_FULL:$PATH" HOME="$TMP/home" USER=tester \
+    HFCTL_DIR="$HF_STACK" HFCTL_LIMITS="$lim" HFCTL_KFD="$TMP/kfd-node" HFCTL_DRI="$TMP/dri-node" \
+    HFCTL_FAUX_LINGER=1 \
+    HFCTL_FAUX_LOG="$FAUXLOG" HFCTL_FAUX_CNT="$FAUXCNT" HFCTL_FAUX_ORPHAN_ID="$ORPHAN_ID" HFCTL_FAUX_TMP="$TMP" \
+    bash "$ROOT/hfctl" install --yes --force 2>&1); rc=$?
+  [ "$rc" = 0 ] \
+    && printf '%s' "$out" | grep -q 'SMOKE: OK' \
+    && printf '%s' "$out" | grep -q 'автозапуск ВКЛ' \
+    && [ -f "$HF_STACK/.env" ] \
+    && [ -f "$TMP/home/.config/systemd/user/hipfire-compose.service" ] \
+    && grep -q "Environment=CONTAINERS_CONF=$HF_STACK/tpl/etc/hfctl-containers.conf" "$TMP/home/.config/systemd/user/hipfire-compose.service"
+}
+
+# N9 install.sh упразднён: файла в репо нет; usage — quickstart './hfctl on',
+#     без install.sh и без 'hfctl install'
+scen_n9_install_gone() {
+  [ ! -e "$ROOT/install.sh" ] || return 1
+  local u; u=$(bash "$ROOT/hfctl" 2>/dev/null || true)
+  printf '%s' "$u" | grep -q './hfctl on' \
+    && ! printf '%s' "$u" | grep -q 'install\.sh' \
+    && ! printf '%s' "$u" | grep -q 'hfctl install' \
+    && printf '%s' "$u" | grep -q 'uninstall'
+}
+
+# инвентарь маркеров: 11 имён на месте, счёт по локациям верный
 check_markers() {
   local m
-  for m in off-stop orphan-heal lock-reclaim pod-infra containers-conf preflight-pkgs gpu-gate gpu-groups gpu-limits; do
+  for m in off-stop orphan-heal lock-reclaim pod-infra containers-conf preflight-pkgs gpu-gate gpu-groups gpu-limits bootstrap-guard uninstall-v2; do
     grep -rq "# fix:$m" "$ROOT/lib" || { echo "маркер # fix:$m отсутствует"; return 1; }
   done
   [ "$(grep -c '# fix:off-stop'    "$ROOT/lib/autostart.sh")" = 1 ] || return 1
@@ -587,11 +800,13 @@ check_markers() {
     c=$(grep -c '# fix:containers-conf' "$ROOT/lib/$f" 2>/dev/null) || c=0
     s=$((s + c))
   done
-  [ "$s" = 3 ] || return 1
+  [ "$s" = 1 ] || return 1   # v2 (этап 14): только export в stack.sh — копии conf упразднены
   [ "$(grep -c '# fix:preflight-pkgs' "$ROOT/lib/stack.sh")" = 2 ] || return 1
   [ "$(grep -c '# fix:gpu-gate'       "$ROOT/lib/stack.sh")" = 1 ] || return 1
   [ "$(grep -c '# fix:gpu-groups'     "$ROOT/lib/stack.sh")" = 1 ] || return 1
   [ "$(grep -c '# fix:gpu-limits'     "$ROOT/lib/stack.sh")" = 1 ] || return 1
+  [ "$(grep -c '# fix:bootstrap-guard' "$ROOT/lib/autostart.sh")" = 2 ] || return 1
+  [ "$(grep -c '# fix:uninstall-v2'    "$ROOT/lib/commands.sh")" = 1 ] || return 1
 }
 
 # ── мутационный движок ───────────────────────────────────────────────────────
@@ -616,7 +831,7 @@ mutant_sed() {  # mutant_sed <имя> <файл-от-ROOT> <sed-expr> → пут
 check_mutation() {  # check_mutation <лейбл> <путь|''> <сценарий…>
   local label="$1" dst="$2"; shift 2
   if [ -z "$dst" ]; then bad "мутация $label: маркер не найден (дрейф маркеров)"; return; fi
-  if ! bash -n "$dst/lib/autostart.sh" "$dst/lib/stack.sh" "$dst/lib/stack_files.sh" 2>/dev/null; then
+  if ! bash -n "$dst/lib/autostart.sh" "$dst/lib/stack.sh" "$dst/lib/stack_files.sh" "$dst/lib/commands.sh" 2>/dev/null; then
     bad "мутация $label: мутант не парсится"; return
   fi
   local prev="${HF_TREE:-$ROOT}"; HF_TREE="$dst"   # $ROOT эквивалентен unset для hf
@@ -646,7 +861,7 @@ else
 fi
 
 echo "== 1. инвентарь маркеров # fix:<имя> (защита от дрейфа)"
-if check_markers; then ok "9 имён маркеров на месте, счёт по локациям 1/2/2/2/3/2/1/1/1"; else bad "инвентарь маркеров: $(check_markers 2>&1)"; fi
+if check_markers; then ok "11 имён маркеров на месте, счёт по локациям верен (containers-conf: 1 — export в stack.sh)"; else bad "инвентарь маркеров: $(check_markers 2>&1)"; fi
 
 echo "== 2. Ф1 off: явный podman stop основного контейнера"
 if scen_f1_fail; then ok "Ф1: compose stop rc 1 → podman stop hipfire_hipfire_1 вызван, off дошёл до «ВЫКЛ» rc 0"; else bad "Ф1 позитив (compose stop fail)"; fi
@@ -695,7 +910,7 @@ else
 fi
 check_mutation "lock-reclaim" "$(mutant_marker lock-reclaim lock-reclaim)" scen_f3_stale
 check_mutation "pod-infra" "$(mutant_marker pod-infra pod-infra)" scen_f4_empty
-check_mutation "containers-conf" "$(mutant_marker containers-conf containers-conf)" scen_f5_deliver
+check_mutation "containers-conf" "$(mutant_marker containers-conf containers-conf)" scen_f5_env
 if grep -q 'Environment=CONTAINERS_CONF' "$ROOT/tpl/systemd/hipfire-compose.service.tpl"; then
   check_mutation "containers-conf-unit" "$(mutant_sed containers-conf-unit tpl/systemd/hipfire-compose.service.tpl '/Environment=CONTAINERS_CONF/d')" scen_f5_deliver
 else
@@ -705,6 +920,22 @@ check_mutation "preflight-pkgs" "$(mutant_marker preflight-pkgs preflight-pkgs)"
 check_mutation "gpu-gate" "$(mutant_marker gpu-gate gpu-gate)" scen_p_c
 check_mutation "gpu-groups" "$(mutant_marker gpu-groups gpu-groups)" scen_p_d
 check_mutation "gpu-limits" "$(mutant_marker gpu-limits gpu-limits)" scen_p_e
+
+echo "== 9. 14.1 лейаут v2: bootstrap первого on / uninstall v2 / роутер (N1–N9)"
+if scen_n1_bootstrap; then ok "N1: bootstrap первого on — конвейер §Б, юниты ПОСЛЕ smoke/check_route (Р1), маркер снят, .env/.data/юниты/симлинк на месте"; else bad "N1 bootstrap-happy"; fi
+if scen_n2_idempotent; then ok "N2: второй on на развёрнутом стеке — без конвейера (нет apt/usermod/sudo-install и podman run), юниты+up"; else bad "N2 bootstrap-idempotent"; fi
+if scen_n3_guard; then ok "N3: guard мутаторов на развёрнутом стеке — --profile и --no-autostart → die с подсказкой, ноль действий"; else bad "N3 on-мутаторы-guard"; fi
+if scen_n4_prepopulated; then ok "N4: bootstrap с готовым .data/models (мигра-механика) — maунт .data, файлы целы, pull образа пропущен"; else bad "N4 готовые модели"; fi
+if scen_n5_uninstall; then ok "N5: uninstall v2 — юниты/linger/limits/down сняты; клон и .data целы; без purge — rmi и rm моделей нет"; else bad "N5 uninstall-v2"; fi
+if scen_n6_purge; then ok "N6: uninstall --purge-models --purge-image — .data/models удалена, profiles целы, rmi вызван"; else bad "N6 purge-флаги"; fi
+if scen_n7_layout_statics; then ok "N7: статика лейаута (.gitignore/.data-глобалы/lock×3 в .data/tpl-conf/bench OUT/без sync_tree) + запуск из подкаталога клона"; else bad "N7 статика+подкаталог"; fi
+if scen_n8_router_install; then ok "N8: роутер install→cmd_on — happy-path bootstrap через алиас (SMOKE/юниты с tpl-conf/.env)"; else bad "N8 роутер install"; fi
+if scen_n9_install_gone; then ok "N9: install.sh удалён; usage — quickstart './hfctl on', без install.sh и 'hfctl install'"; else bad "N9 install-отсутствие+usage"; fi
+
+echo "== 10. мутации 14.1: новые гварды на копиях дерева → сценарий падает"
+check_mutation "bootstrap-guard" "$(mutant_marker bootstrap-guard bootstrap-guard)" scen_n3_guard
+check_mutation "uninstall-v2" "$(mutant_marker uninstall-v2 uninstall-v2)" scen_n6_purge
+check_mutation "uninstall-v1-clone-rm" "$(mutant_sed uninstall-rm lib/commands.sh 's/cmd_off || true/cmd_off || true\n  rm -rf "${STACK_DIR:?}"/')" scen_n5_uninstall
 
 printf 'ИТОГО: PASS=%s FAIL=%s\n' "$PASS" "$FAIL"
 [ "$FAIL" = 0 ]

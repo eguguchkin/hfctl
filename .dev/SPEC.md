@@ -23,45 +23,52 @@ hipfire 0.4.5) и по upstream-докам (`docs/SERVE.md`, `docs/MODELS.md`).
 ```bash
 git clone https://github.com/<org>/hfctl.git
 cd hfctl
-./install.sh              # кладёт дерево hfctl в стек + симлинк в ~/.local/bin (без sudo)
-hfctl install             # preflight → модели → конфиг → старт → smoke → автозапуск
+./hfctl doctor           # (опционально) проверка железа до скачивания
+./hfctl on               # bootstrap: preflight → модели → конфиг → health → smoke → автозапуск
 ```
 
-- Единственный путь — `git clone` + `./install.sh` (этап 8: curl-режим и
-  «одной строкой» УДАЛЕНЫ, решение пользователя 2026-11-10).
-- `install.sh` — **только** bootstrap: копирует `hfctl`, `lib/`, `tpl/` в
-  `~/hipfire/` (бинарь в стеке, `~/.local/bin/hfctl` = симлинк), проверяет
-  PATH (не в PATH → печатает строку для `.bashrc`/`.profile`), печатает
-  следующий шаг. Больше ничего. Запуск вне дерева (рядом нет
-  `hfctl`+`lib/`+`tpl/`) — внятный отказ с текстом и rc 1.
-- `hfctl` НЕ однофайловый (этап 8): диспетчер `hfctl` (env-конфигурация +
-  `source` модулей + dispatch) + `lib/*.sh` (логические модули) + `tpl/`
-  (все шаблоны: compose-yaml, systemd-юниты, `.env`, python-помощники,
-  bench-фикстура). Дистрибуция и обновление — целым деревом: повтор
-  `install.sh` из того же клона идемпотентен, свежий клон → `install.sh` =
-  обновление (AGENTS правило 5; install.sh перезаписывает ровно
-  `hfctl`+`lib/`+`tpl/`, остальное в стеке не трогает).
-- Все артефакты инсталляции — в `~/hipfire/` (диспетчер `~/hipfire/hfctl` +
-  `lib/`, `tpl/`, модели `~/hipfire/models/<сет>/` per-сет, состояние
-  движка per-профиль `~/hipfire/profiles/<профиль>/{config,kernel}` (этап 7:
-  явные bind-маунты вместо named volumes; disk-тир кэша —
-  `profiles/<профиль>/config/session-cache/`), compose-файлы, `.env`, логи).
-  Вне каталога: systemd-user юниты, образ ghcr, podman network,
-  `limits.d/99-hipfire-memlock.conf` (рендер tpl/etc), группы render,video, linger.
+- Единственный путь — `git clone` + `./hfctl on` (этап 8: curl-режим и
+  «одной строкой» УДАЛЕНЫ, решение пользователя 2026-11-10; этап 14:
+  install.sh упразднён — фазу install поглотил первый `on`, bootstrap —
+  конвейер бывшего `hfctl install`).
+- `hfctl` — диспетчер (`hfctl`: env-конфигурация + `source` модулей +
+  dispatch) + `lib/*.sh` (логические модули) + `tpl/` (все шаблоны:
+  compose-yaml, systemd-юниты, `.env`, python-помощники, bench-фикстура) +
+  `tests/` (faux-батарея) + `.dev/` (борд). Клон = стек = место запуска
+  (STACK_DIR = каталог клона, запуск работает из любого подкаталога).
+- **Лейаут v2 (этап 14):** всё машинное состояние — внутри `.data/` клона
+  (gitignored):
+
+  | Путь | Содержимое |
+  |---|---|
+  | `<клон>/.env` | канон профиля (пишет hfctl) |
+  | `<клон>/.data/models/{27b,flash}/` | сеты моделей + draft |
+  | `<клон>/.data/profiles/<профиль>/{config,kernel}/` | движок-хоум: конфиг, disk-тир кэша (`config/session-cache/`), pid |
+  | `<клон>/.data/bench-runs/` | артефакты bench |
+  | `<клон>/.data/benchmarks/prompts/` | опциональный `/prompts`-маунт (лаба создаёт сама) |
+  | `<клон>/.data/.hfctl-stopped`, `.hfctl.lock` | маркер явной остановки; flock up/boot/watchdog |
+
+  **Вне каталога** остаются только осознанные исключения: systemd-user юниты
+  `~/.config/systemd/user/`, симлинк `~/.local/bin/hfctl` (ставит
+  bootstrap), `/etc/security/limits.d/99-hipfire-memlock.conf` (рендер
+  tpl/etc), группы render,video, linger, podman-образ и контейнеры.
+  `git clean -fd` безопасен (машинное — gitignored); `git clean -fdx`
+  удаляет `.data/` — запрещённая команда (README-warning). Одна инсталляция
+  на юзера (контейнер/порт/юниты глобальны) — README-документация.
 
 ## 3 · Карта команд
 
 | Команда | Действие |
 |---|---|
-| `hfctl install [--profile P] [--port N] [--bind A] [--models-dir D] [--yes] [--no-autostart]` | Развернуть «с нуля или поверх»: preflight → скачивание нужного профилю → конфиг-профиль → старт → health → smoke → **автозапуск включается** (если не `--no-autostart`). Идемпотентна: повтор продолжает/чинит, не начинает заново |
+| `hfctl on [--profile P] [--port N] [--bind A] [--models-dir D] [--yes] [--no-autostart]` | **Единая точка входа (этап 14).** На пустом клоне (нет `.env`) — bootstrap (бывший install): preflight → скачивание нужного профилю → конфиг-профиль → старт → health → smoke → **автозапуск включается последним** (юниты после health/smoke — таймер вотчдога не тикает до первого здорового подъёма). Идемпотентна: оборванный bootstrap повторяется той же командой с теми же флагами. На развёрнутом стеке — автозапуск + поднять сейчас; флаги-мутаторы и `--no-autostart` → отказ с подсказкой (`use` / `hfctl up`) |
 | `hfctl use <profile>` | Переключиться на профиль: проверка железа → ленивый добор недостающих моделей (с вопросом и цифрами) → конфиг → `up -d --force-recreate` → health → smoke. Конфиг автозапуска заменяется новым профилем. Ничего не удаляет |
 | `hfctl status [--json]` | Активный профиль, health, **фактически принятый батч-роут**, что скачано, режим автозапуска, версия образа |
 | `hfctl logs [-f] [N]` | Логи контейнера сервера (по умолчанию хвост N=50) |
 | `hfctl watch [--interval N]` | Живой дашборд обработки (дефолт N=2 c): один коллектор — `/stats`, `/metrics`, host `/sys` (hwmon AMD-карты, k10temp), `/proc`, `podman logs -f`. **На TTY — TUI** (curses, alt-экран): блок «Движок» (Model, Uptime, Queue (`queue_depth`), Errors (`hipfire_requests_failed_total` — только когда >0), τ avg (`hipfire_spec_tau`), Served (`requests_served`), Retries (`retries_attempted` — только когда ≠0), Cache tok (`hipfire_cached_prompt_tokens_total`, compact-формат токенов: <1000 — целое, ≥1000 → `99.1k`, ≥1M → `1.2M`; при недоступности `/stats` блок = «недоступен», остальное живёт)), «Железо» (GPU freq, GPU load, GPU power, GPU temp — max по hwmon первой AMD-карты, CPU temp), «Скорость» (честные метрики: движок обновляет счётчики токенов только в done-событии, live-скорости в процессе нет — `decode tok/s` = `recent_tok_s` из `/stats` (последний завершённый запрос, нет данных → `-`), `prefill tok/s` = среднее гистограммы `hipfire_prefill_tokens_per_second` (`_sum`/`_count`, нет образцов → `-`), sparkline ~60 с — Δ`prompt_tokens`/Δ`completion_tokens` за тик (активность, пики на завершении; НЕ скорость)), «Память» (RAM: MemAvailable/Total GiB + bar, Swap, KV pages), «Логи» (сид `podman logs --tail 50` при старте — стартовые строки видны сразу + live `podman logs -f`, нижняя зона на всю ширину; «(ждём логи…)» только пока и сид пуст, и новых строк нет). Клавиши: `q` — выход, `+`/`-` — интервал 1..10 c, `p` — пауза логов. Минимальный терминал 80×24; при меньшем — деградация (блоки сжимаются клипом
 контент-хвостов, «Логи» держит минимум 3 строки), не краш; не-UTF-8/кривой TERM — ASCII-глифы либо фолбэк в plain-режим. Пороги цветом: RAM < 10 GiB — красный, CPU temp и GPU temp — жёлтый 80…89 °C, красный ≥90 °C (ровно границы), GPU load < 5% при очереди > 0 — подсветка (подозрение на зависание). **В не-TTY (пайп/лог-файл) — стрим**: строка БЕСУСЛОВНО раз в N c (первая сразу) с полным срезом — `очередь` / `обслужено` (+дельта, когда >0) / `cache tok` (тот же компактный формат; без цвета — в plain ANSI не печатается) / `ошибки` (только >0) / `ретраи` (только ≠0) / prefill tok/s (avg из гистограммы) / decode tok/s (последний запрос, `recent_tok_s`) / `mem: avail/total GiB` / `swap` / `gpu: tempC sclkMHz powerW busy%` / `cpu: tctlC` (поле без датчика — `?`). Сервер недоступен — строка «сервер недоступен (нет /stats…)» раз в 30 c (первая сразу), без дублей, восстановление без перезапуска. Выход: `q` или Ctrl-C (rc 0) |
-| `hfctl on` | Включить автозапуск (юнит+таймер+linger) и поднять стек. Аномалии подъёма самолечатся — §14 |
+| `hfctl on` | На развёрнутом стеке: включить автозапуск (юнит+таймер+linger) и поднять стек. Аномалии подъёма самолечатся — §14; на пустом клоне — bootstrap (см. выше) |
 | `hfctl off` | Остановить стек **и** снять с автозапуска (юниты disable, вотчдог выключен, linger off). Остановка двусоставная (§14): `compose stop` + явный `podman stop` основного контейнера. Файлы, модели, образ целы |
-| `hfctl uninstall [--purge-models] [--purge-image]` | Полная зачистка: контейнеры, сеть проекта, state-каталоги `profiles/` + legacy-вольюмы, юниты, limits.d, маркеры, `~/hipfire` (модели при сохранении переезжают и возвращаются). Подтверждение с перечнем; по умолчанию модели и образ щадит |
+| `hfctl uninstall [--purge-models] [--purge-image]` | **v2 (этап 14):** снять привязки стека к машине: юниты+таймер, linger, контейнер и сеть проекта (compose down), limits.d. НЕ трогает: клон (ни одного rm в него), `.data/` (модели/профили/bench-runs), симлинк, podman-storage. Подтверждение с перечнем; `--purge-models` удаляет только `.data/models` (profiles целы), `--purge-image` — podman rmi |
 
 Вспомогательные:
 
@@ -71,7 +78,8 @@ hfctl install             # preflight → модели → конфиг → ст
 | `hfctl models` | Что скачано (файл, размер, sha-статус), что требуется каждому профилю, свободное место |
 
 Скрытые синонимы (не в help/README, совместимость с прежними заметками):
-`up`→поднять сейчас, `down`→стоп сейчас (маркер), `mode X`→`use X`.
+`up`→поднять сейчас, `down`→стоп сейчас (маркер), `mode X`→`use X`,
+`install`→`on` (лейаут v1; этап 14).
 
 **Всего 7 команд повседневного цикла + 2 диагностики.** Автономная команда
 `autostart/noautostart` исчезает — её место заняли `on/off`.
@@ -80,9 +88,9 @@ hfctl install             # preflight → модели → конфиг → ст
 
 Два независимых переключателя; каждая команда честно говорит, какой трогает:
 
-1. **Профиль** (`install --profile` / `use`) — что и как крутится.
-   Канонический профиль пишется в стек (`~/hipfire/.env`: `HFCTL_PROFILE`);
-   `install`-повтор, boot-юнит и вотчдог поднимают именно его.
+1. **Профиль** (`on --profile` при первом запуске / `use`) — что и как
+   крутится. Канонический профиль пишется в клон (`~/hfctl/.env`:
+   `HFCTL_PROFILE`); boot-юнит и вотчдог поднимают именно его.
 2. **Включён/выключен** (`on` / `off`) — поднимать ли при загрузке.
    `off` выключает и boot-юнит, и вотчдог-таймер (механизм маркера
    `.hfctl-stopped` остаётся внутренней защитой, пользователю не виден).
@@ -200,6 +208,71 @@ experimental — см. §7 про отображение фактическог�
    qwen3.8:27b-mq4-xts`); mq6 остаётся скачанной и доступной hot-swap'ом.
 8. `flash-multi` конфиг + скачка split base + PLE sidecar'ов (init-контейнер
    `pull` тянет их по реестру сам, хардлинки shared-файлов — проверять).
+
+Этапом 14 (лейаут v2, 2026-11-21) этот список исторический: пункт 1 (install.sh)
+и дистрибуция переписаны — клон = стек, bootstrap = первый `hfctl on`,
+состояние — в `.data/` клона (§15). Остальное (профили/гейты/use/watch) без
+изменений.
+
+## 15 · Лейаут v2 и миграция (этап 14, 2026-11-21)
+
+**Клон = стек = место запуска.** `STACK_DIR = dirname(диспетчера)` (env-крючок
+`HFCTL_DIR` — selfcheck/миграция; прод не задаёт); запуск работает из любого
+подкаталога клона, cwd не читается. Дефолты: `MODELS_BASE=$STACK_DIR/.data/models`,
+`STATE_BASE=$STACK_DIR/.data/profiles`, `STOP_MARKER=$DATA_DIR/.hfctl-stopped`,
+lock `$DATA_DIR/.hfctl.lock`, bench `OUT=$DATA_DIR/bench-runs`, watchdog-лог
+`$DATA_DIR/.hfctl-watchdog.log` — всё машинное внутри `.data/` (инвариант);
+исключения вне клона — таблица в §2.
+
+**Bootstrap первого `on`.** `hfctl on` на пустом клоне (нет `.env`) — полный
+конвейер бывшего install (RAM-гейт → set_models_dir → preflight 13.2 →
+write_stack_files: каркас `.data` + compose-тройка → write_env → pull → up →
+apply_profile → force-recreate → health 900 → smoke → check_route), юниты —
+ПОСЛЕДНИМИ (cmd_autostart после health: таймер вотчдога OnBootSec=2min не
+должен тикать до первого здорового подъёма — иначе первый тик встанет в flock
+и реклеймом убьёт сам bootstrap, класс И2). Повтор оборванного bootstrap —
+той же командой с теми же флагами (идемпотентно; `.env` пишется после
+файловой фазы — он же маркер «развернут»). На развёрнутом стеке `on` =
+cmd_autostart + cmd_up; флаги-мутаторы (`--profile/--port/--bind/--models-dir`)
+и `--no-autostart` → die с подсказкой (`use` / «поднять без него: hfctl up»).
+`install` — скрытый алиас `on` (1 строка роутера); install.sh удалён.
+`sync_tree` (самокопия дерева в стек) упразднён вместе с копией conf.
+
+**Uninstall v2.** Снимает юниты+таймер, linger, контейнер и сеть проекта
+(`cmd_off` с Ф1-двойным стопом + `compose down`), limits.d — и всё; клон,
+`.data/`, образ и симлинк не трогаются. `--purge-models` → `rm -rf
+.data/models` (profiles целы); `--purge-image` → `podman rmi`.
+
+**Миграция машин v1 (`~/hipfire`) → v2 (клон)** — контракт процедуры;
+исполнение — отдельное деплой-окно по GO (один заход, даунтайм):
+
+```
+hfctl off                                # старый бинарь: стоп, юниты, linger
+cd ~/hfctl && git pull                   # код v2 (install.sh в клона нет)
+mkdir -p .data
+mv ~/hipfire/models   .data/models       # mv в пределах /home — иноды целы
+mv ~/hipfire/profiles .data/profiles
+[ -d ~/hipfire/bench-runs ] && mv ~/hipfire/bench-runs .data/bench-runs
+#   НЕ переносить: .env, compose*.yml, .hfctl-containers.conf, бинарь+lib+tpl,
+#   маркеры (.hfctl-stopped/.hfctl.lock — мусор старого стека)
+./hfctl on --profile <id из старого .env> [--port N --bind A]   # если не дефолт
+#   bootstrap: preflight = no-op → compose-тройка в клона → .env заново
+#   (пути .data) → pull пропущен (всё локально) → up → healthy → smoke → юниты.
+#   Симлинк ~/.local/bin/hfctl → ~/hfctl/hfctl ставит ensure_symlink.
+#   Конфиг движка (config.toml) переехал с profiles — apply_profile
+#   переподтверждает канон.
+./hfctl doctor && ./hfctl status         # healthy; затем reboot-приёмка окна
+rm -rf ~/hipfire                         # старый стек — после healthy
+```
+
+Примечания: mv-шаги — часть задокументированной процедуры (плановые, И2
+соблюдён); потерянные кастомизации ограничены портом/bind/дефолтной моделью
+(их несли старые `.env`) — передаются флагами/env первого `on`; конфиг
+движка не теряется (переезжает с profiles). Отката нет (до `rm -rf
+~/hipfire` всё обратимо mv-назад). Совместимости «новый код на старом
+стеке» нет и не тестируется: первая команда нового кода на машине — первый
+шаг процедуры после `hfctl off`. Лабораторные скрипты llm-lab с путями
+`~/hipfire` (bench_arms, prompts-маунт) обновляются хвостом того же окна.
 
 ## 11 · План приёмки
 
@@ -346,16 +419,15 @@ happy-path не меняются; каждая защита срабатывае
 - **CONTAINERS_CONF — скоуп slirp4netns на стек.** Статичный файл
   `tpl/etc/hfctl-containers.conf` (`[network] default_rootless_network_cmd =
   "slirp4netns"` — ровно проверенный EXP-013 обход AppArmor pasta-бага
-  teardown netns) доставляется в `$STACK_DIR/.hfctl-containers.conf` из
-  двух мест: `write_stack_files` (install/use — путь обновления существующих
-  машин) и `cmd_autostart` (строго ДО рендера юнитов — инвариант «юниты
-  рендерятся только при наличии файла»; в `sync_tree` доставка НЕ встроена —
-  он no-op на существующих стеках). `compose()` экспортирует
-  `CONTAINERS_CONF` только при наличии файла: старый стек без файла → env
-  чист, поведение как прежде. Оба юнит-шаблона (`hipfire-compose.service`,
-  `hipfire-compose-watchdog.service`) несут
-  `Environment=CONTAINERS_CONF=__STACK_DIR__/.hfctl-containers.conf`
-  (покрывает `_boot`/`_watchdog` целиком). Глобальный `~/.config/containers`
+  teardown netns). **Лейаут v2 (этап 14): производной копии нет** — оба
+  потребителя читают tracked-файл клона напрямую: `compose()` экспортирует
+  `CONTAINERS_CONF=$STACK_DIR/tpl/etc/hfctl-containers.conf` только при
+  наличии файла (кривое дерево клона → env чист, поведение как прежде), оба
+  юнит-шаблона (`hipfire-compose.service`, `hipfire-compose-watchdog.service`)
+  несут `Environment=CONTAINERS_CONF=__STACK_DIR__/tpl/etc/hfctl-
+  containers.conf` (покрывает `_boot`/`_watchdog` целиком). Инвариант «conf
+  существует до подъёма/рендера юнитов» выполняется фактом клона
+  (`git clean -fd` untracked не трогает). Глобальный `~/.config/containers`
   не трогается; прямые podman-вызовы hfctl (inspect/stop/rm) env не
   получают — сетевой бэкенд значим только при create/netns, storage общий
   (EXP-013: graphRoot идентичен с env и без).
@@ -370,14 +442,14 @@ happy-path не меняются; каждая защита срабатывае
 
 **И1 — «голая Ubuntu одной командой».** Установка на машину с чистой Ubuntu —
 одна команда пользователя после получения кода (git clone не считается — это
-получение самой обвязки): hfctl — `./install.sh`; gfctl — первый
-`gfctl use <профиль>` (bootstrap силами gfctl, решение 4.4). Обвязка сама
-декларирует и ставит (идемпотентно, sudo точечно): podman, podman-compose,
-containers-storage, psmisc (fuser), curl; GPU-подготовку хоста — группы
-`render`/`video`, limits.d memlock — только при наличии `/dev/kfd`/`/dev/dri`,
-с честным сообщением «требуется перелогин/ребут» (limits.d/группы не
-действуют на текущую сессию — GOTCHAS). На не-GPU машине GPU-шаг пропускается
-с info-строкой.
+получение самой обвязки): hfctl — первый `hfctl on` из клона (bootstrap
+силами hfctl; install.sh упразднён этапом 14, решение 4.4); gfctl — первый
+`gfctl use <профиль>`. Обвязка сама декларирует и ставит (идемпотентно, sudo
+точечно): podman, podman-compose, containers-storage, psmisc (fuser), curl;
+GPU-подготовку хоста — группы `render`/`video`, limits.d memlock — только при
+наличии `/dev/kfd`/`/dev/dri`, с честным сообщением «требуется
+перелогин/ребут» (limits.d/группы не действуют на текущую сессию — GOTCHAS).
+На не-GPU машине GPU-шаг пропускается с info-строкой.
 
 **И2 — «сценарная приёмка без ручных корректировок».** Пройденным считается
 только сценарий-последовательность команд обвязок (пример: `hfctl off;
@@ -392,16 +464,19 @@ gfctl on; hfctl off`) плюс фиксированные диагностиче
 Соответствие hfctl на 2026-11-21: И1 — закрыт кодом 13.2 (apt-пятёрка одним
 need-списком; GPU-подготовка — гейт /dev/kfd|/dev/dri, группы render,video,
 limits.d из tpl/etc, честный вывод «перелогин/ребут», info-пропуск на
-не-GPU; юниты/linger; 13.1 самолечение) — живой приём: EXP-хвост деплой-окна
-(чистая машина + FAEX/evo = no-op); И2 — выполнен для 4 известных аномалий
-(13.1), поддерживается правилом выше для будущих.
+не-GPU; юниты/linger; 13.1 самолечение) + этапом 14 (точка входа — первый
+`hfctl on`, юниты последними); живой приём: EXP-хвост деплой-окна (чистая
+машина + no-op на развёрнутых машинах); И2 — выполнен для 4 известных
+аномалий (13.1), поддерживается правилом выше для будущих.
 
 **И3 — «деплой и прогоны на машину всегда из GitHub».** Код на машину
 попадает только через GitHub: клон репо на машине → `git pull` → синк
 производных файлов в стек. tar/cp из локального воркспейса разработчика
 запрещены — в том числе в тестовых прогонах (EXP): сценарий гоняется из
-GitHub-производного кода на машине. (2026-11-21:~/hfctl клон создан на
-FAEX/evo; стек FAEX пересинкнут из клона.)
+GitHub-производного кода на машине. (2026-11-21: ~/hfctl клон создан на
+FAEX/evo; стек FAEX пересинкнут из клона.) После миграции этапа 14 стек =
+клон — инвариант автоматичен: обновление кода = `git pull` в клоне,
+отдельного синка производных файлов больше нет.
 
 ## 13.2: host-preflight — apt-пятёрка + GPU-подготовка хоста (2026-11-21)
 

@@ -1,10 +1,13 @@
 # shellcheck shell=bash
-# ── подкоманды: install/use/status/logs/watch/doctor/models/pull/uninstall ──
+# ── подкоманды: bootstrap/use/status/logs/watch/doctor/models/pull/uninstall ─
 
-# Назначение: `hfctl install` — полная установка/обновление стека на голом
-#   Ubuntu/Debian: RAM-гейт → префлайт хоста → файлы стека → образ и модели →
-#   конфиг профиля → recreate → health → смоук → роут → автозапуск.
-#   Идемпотентен (повтор = донастройка поверх существующего).
+# Назначение: `hfctl bootstrap` (внутренняя — зовётся из cmd_on при первом
+#   `hfctl on` на пустом клоне) — полный конвейер установки на голом
+#   Ubuntu/Debian: RAM-гейт → префлайт хоста → файлы стека (каркас .data) →
+#   образ и модели → конфиг профиля → recreate → health → смоук → роут.
+#   Юниты автозапуска здесь НЕ ставятся — их ставит вызывающий cmd_on после
+#   health (порядок «юниты последними»: таймер вотчдога активируется только
+#   на здоровом стеке — Р1). Идемпотентен (повтор = донастройка поверх).
 #
 # Побочные эффекты (по фазам):
 #   Хост (preflight, sudo точечно): apt-пятёрка podman/podman-compose/
@@ -12,7 +15,7 @@
 #     render,video, limits.d memlock-файл из tpl/etc, enable-linger;
 #     не-GPU машина — info-пропуск GPU-шага; exit 42 при свежих группах/
 #     лимитах (нужен перезаход/ребут).
-#   Файлы: write_stack_files — дерево hfctl (бинарь+lib/+tpl/) в $STACK_DIR,
+#   Файлы: write_stack_files — каркас .data (models-сет активного профиля),
 #     симлинк ~/.local/bin/hfctl, compose-тройка + compose.local.yml;
 #     write_env — ПЕРЕЗАПИСЬ .env канона профиля.
 #   Обвес движка: podman pull образа (если нет локально); pull_profile_models
@@ -20,18 +23,17 @@
 #     apply_profile — cfgset в config.toml профиля; `up -d
 #     --force-recreate` (движок перечитывает конфиг только на recreate);
 #     wait_health 900 + smoke (2 реальных запроса генерации) + check_route.
-#   Финал: cmd_autostart (юниты systemd-user + watchdog-таймер + linger)
-#     если не --no-autostart; в stdout — логи фаз, тело /health,
-#     смоук-ответы, роут и usage-справка.
+#   В stdout — логи фаз, тело /health, смоук-ответы, роут и usage-справка.
 #
 # Ограничения/допущения: порядок фаз фиксирован (RAM-гейт ДО любого
 #   скачивания — spec §6). Неизвестный флаг или профиль → die (exit 1).
 #   Env-входы: HFCTL_MODEL — модель по умолчанию поверх профиля;
 #   HFCTL_FORCE=1 или --force — обход RAM-гейта с warn (флаг внутри
-#   install выставляет HFCTL_FORCE=1 — единственный env-канал);
+#   bootstrap выставляет HFCTL_FORCE=1 — единственный env-канал);
 #   HFCTL_YES=1 или --yes — неинтерактив. Локалы одной строкой:
 #   prof — алиас профиля из --profile ('' → PROFILE_DEFAULT);
-#   no_autostart/force — '0' | '1'.
+#   no_autostart — '0' | '1' (принимается ради cmd_on, который ставит
+#   юниты сам; внутри bootstrap не читается); force — '0' | '1'.
 #   exit 42 из preflight прерывает процесс до записи .env.
 #
 # @param 1..N: string[] # флаги (все опциональны): --profile <алиас> |
@@ -39,7 +41,7 @@
 #   --models-dir <путь> | --no-autostart | --force | --yes
 # @returns integer      # всегда 0 при возврате — отказы завершают процесс:
 #   die/profile_gate (1), preflight (42), сбои шагов (set -e)
-cmd_install() {
+cmd_bootstrap() {
   local prof="" no_autostart=0 force=0
   while [ $# -gt 0 ]; do
     case "$1" in
@@ -71,11 +73,6 @@ cmd_install() {
   wait_health 900
   smoke
   check_route "$prof"
-  if [ "$no_autostart" = 1 ]; then
-    echo "(автозапуск не включён — '--no-autostart'; включить: hfctl on)"
-  else
-    cmd_autostart
-  fi
   log "готов. Сервер: http://$BIND:$PORT | профиль: $prof | модель по умолчанию: $(cur_model)"
   cat <<EOF
 
@@ -131,7 +128,7 @@ cmd_use() {
     esac
   done
   [ -n "$p" ] || die "использование: hfctl use <profile> (${PROFILE_LIST// /|})"
-  [ -f "$STACK_DIR/.env" ] || die "стек не установлен — сначала 'hfctl install'"
+  [ -f "$STACK_DIR/.env" ] || die "стек не установлен — сначала 'hfctl on'"
   p=$(resolve_profile "$p") || die "неизвестный профиль '$p' (доступны: $PROFILE_LIST)"
   local prev_prof prev_model
   prev_prof=$(cur_profile); prev_model=$(cur_model)
@@ -355,7 +352,7 @@ cmd_doctor() {
       warn "state: $sd отсутствует или не записуем — пересоздай стек (hfctl install)"
     fi
   else
-    echo "стек: НЕ УСТАНОВЛЕН ($STACK_DIR/.env нет) — 'hfctl install'"
+    echo "стек: НЕ УСТАНОВЛЕН ($STACK_DIR/.env нет) — сначала 'hfctl on'"
   fi
   echo "── окружение ──"
   command -v podman >/dev/null && echo "podman: $(podman --version)" || echo "podman: НЕТ (install поставит)"
@@ -451,36 +448,37 @@ cmd_pull() {
   echo "(активация — 'hfctl use $p'; RAM-гейт оценивается при use)"
 }
 
-# Назначение: `hfctl uninstall` — снять стек: контейнеры и сеть проекта,
-#   state-каталоги и файлы стека, юниты автозапуска и limits.d; модели и
-#   образ удаляются только по явным флагам.
+# Назначение: `hfctl uninstall` (v2, лейаут gfctl/этап 14) — снять ПРИВЯЗКИ
+#   стека к машине: юниты автозапуска и таймер, linger, контейнер и сеть
+#   проекта, limits.d; клон, .data/ (модели/профили/bench-runs), образ и
+#   симлинк НЕ трогаются. Модели и образ удаляются только по явным флагам.
 #
 # Побочные эффекты (по порядку): подтверждение ask (не-TTY или без --yes —
 #   авто-нет → «отменено», exit 0 без изменений); cmd_off || true (стоп
 #   контейнеров, маркер остановки, юниты ~/.config/systemd/user/* удалены,
-#   daemon-reload, linger off); compose down (контейнеры + сеть проекта).
-#   Границы rm -rf: $STACK_DIR ЦЕЛИКОМ (бинарь hfctl, lib/, tpl/,
-#   compose-файлы, .env, модели и state по путям по умолчанию), поэтому при
-#   сохранении моделей база УВОЗИТСЯ целиком (mv $MODELS_BASE →
-#   $STACK_DIR.hfctl-models-$$, возврат после rm) — иначе сносились бы чужие
-#   сеты; с --purge-models база не увозится и уходит вместе со стеком.
-#   Далее: sudo rm /etc/security/limits.d/99-hipfire-memlock.conf (если
-#   есть); с --purge-image — podman rmi образа (отказ заглушён). Итог
-#   «uninstall DONE». Не трогаем: podman, группу render, чужие каталоги.
+#   daemon-reload, linger off; Ф1-двойной стоп сохранён); compose down в
+#   субшелле (контейнеры + сеть проекта; || true); sudo rm -f limits.d
+#   99-hipfire-memlock.conf (если есть). Флаги: --purge-models → rm -rf
+#   $DATA_DIR/models (только база моделей-сетов; profiles целы); --purge-image
+#   → podman rmi образа (отказ заглушён). Итог «uninstall DONE». НЕ трогаем:
+#   клон $STACK_DIR (ни одного rm в него — это git-репо с бордом), .data/
+#   целиком (кроме purge-models), симлинк ~/.local/bin/hfctl, podman, группу
+#   render, чужие каталоги.
 #
-# Ограничения/допущения: по умолчанию STATE_BASE/MODELS_BASE лежат внутри
-#   $STACK_DIR и удаляются вместе с ним; кастомные пути вне стека rm -rf
-#   стека не достанет (вывоз базы при сохранении делает это явно). Локалы
-#   purge_models/purge_image/keep — keep: путь-временя вывезенной базы либо
-#   ''. Сбои остановки/снятия
-#   вешает на `|| true` (uninstall доходит до конца); незащищённые sudo rm
-#   и mv завершают процесс по set -e. Неинтерактив без --yes — штатный
-#   отказ (ask авто-нет).
+# Ограничения/допущения: v1-элементы (перенос $MODELS_BASE во временный
+#   каталог и rm -rf $STACK_DIR) удалены — клон не сносится никогда;
+#   маркеры .data/.hfctl-stopped и .data/.hfctl.lock переживают uninstall —
+#   безвредные пустые файлы. «Одна инсталляция на юзера» (имя контейнера,
+#   порт, имена юнитов глобальны) — README-документация. Локалы
+#   purge_models/purge_image — '0' | '1'. Сбои остановки/снятия/down вешает
+#   на `|| true` (uninstall доходит до конца); незащищённый sudo rm
+#   завершает процесс по set -e. Неинтерактив без --yes — штатный отказ
+#   (ask авто-нет).
 #
 # @param 1..N: string[] # флаги (все опциональны): --purge-models | --purge-image | --yes
 # @returns integer      # всегда 0 при возврате («uninstall DONE»); отказ по вопросу — exit 0
 cmd_uninstall() {
-  local purge_models=0 purge_image=0 keep=""
+  local purge_models=0 purge_image=0
   while [ $# -gt 0 ]; do
     case "$1" in
       --purge-models) purge_models=1; shift ;;
@@ -489,28 +487,20 @@ cmd_uninstall() {
       *) die "неизвестный флаг uninstall: $1 (доступны: --purge-models --purge-image --yes)" ;;
     esac
   done
-  echo "uninstall снимет: контейнеры, сеть проекта, state-каталоги $STATE_BASE"
-  echo "(конфиг/disk-тир кэша/kernels на профиль),"
-  echo "юниты+таймер автозапуска, limits.d, каталог стека $STACK_DIR (включая hfctl)."
-  echo "Модели $MODELS_DIR: $([ "$purge_models" = 1 ] && echo 'УДАЛЯЮТСЯ (--purge-models)' || echo 'СОХРАНЯЮТСЯ (переезжают в стеке)')"
+  echo "uninstall снимет: юниты+таймер автозапуска, linger,"
+  echo "контейнер и сеть проекта (compose down), limits.d 99-hipfire-memlock.conf."
+  echo "ОСТАВИТ: клон $STACK_DIR (код и борд), .data/ — модели, профили, bench-runs,"
+  echo "симлинк ~/.local/bin/hfctl."
+  echo "Модели $MODELS_BASE: $([ "$purge_models" = 1 ] && echo 'УДАЛЯЮТСЯ (--purge-models)' || echo 'СОХРАНЯЮТСЯ (--purge-models — удалить)')"
   echo "Образ $IMAGE: $([ "$purge_image" = 1 ] && echo 'УДАЛЯЕТСЯ (--purge-image)' || echo 'остаётся (--purge-image — удалить)')"
   echo "Не трогаем: podman, группа render, чужие каталоги."
   ask "Продолжить? [y/N] " || { echo "отменено"; exit 0; }
   cmd_off || true
   ( cd "$STACK_DIR" 2>/dev/null && compose down 2>&1 | tail -2 ) || true
-  # модели живут в базе (models/<сет>/ на ВСЕ сеты!) — при сохранении
-  # переезжает БАЗА целиком: иначе rm -rf $STACK_DIR сносит чужие сеты
-  if [ "$purge_models" != 1 ] && [ -d "$MODELS_BASE" ]; then
-    keep="$STACK_DIR.hfctl-models-$$"
-    mkdir -p "$(dirname "$keep")"
-    mv "$MODELS_BASE" "$keep"
-  fi
-  rm -rf "$STACK_DIR"
-  if [ -n "$keep" ]; then mkdir -p "$(dirname "$MODELS_BASE")"; mv "$keep" "$MODELS_BASE"; fi
   if [ -f /etc/security/limits.d/99-hipfire-memlock.conf ]; then
     sudo rm -f /etc/security/limits.d/99-hipfire-memlock.conf
   fi
-  if [ "$purge_models" = 1 ]; then echo "модели удалены"; fi
+  if [ "$purge_models" = 1 ]; then rm -rf "$DATA_DIR/models"; echo "модели удалены"; fi   # fix:uninstall-v2 (только models; profiles целы)
   if [ "$purge_image" = 1 ];  then podman rmi "$IMAGE" 2>/dev/null || true; echo "образ удалён"; fi
   echo "uninstall DONE"
 }

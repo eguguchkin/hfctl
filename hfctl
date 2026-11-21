@@ -1,13 +1,17 @@
 #!/usr/bin/env bash
 # === USAGE-BEGIN ===
 # hfctl — деплой и управление hipfire-сервером (Strix Halo / gfx11xx) на
-# Ubuntu/Debian. Раскладывается деревом: диспетчер hfctl + lib/*.sh + tpl/
-# (шаблоны compose/.env/юнитов/python/фикстуры); запускается ОТ СВОЕГО ИМЕНИ
-# (не root; sudo применяется точечно):
-#   git clone <repo> && cd hfctl && ./install.sh   # бинарь в стек + симлинк в bin
+# Ubuntu/Debian. Живёт git-клоном: клон = стек (диспетчер hfctl + lib/*.sh +
+# tpl/ — код; .data/ — модели, профили, bench-runs; .env — канон профиля);
+# запускается ОТ СВОЕГО ИМЕНИ (не root; sudo применяется точечно):
+#   git clone <repo> && cd hfctl && ./hfctl on   # сервер: preflight → модели →
+#                                                # конфиг → health → smoke → юниты
 #
 # Команды:
-#   install [--profile P] [--port N] [--bind A] [--models-dir D] [--no-autostart]
+#   on [--profile P] [--port N] [--bind A] [--models-dir D] [--no-autostart]
+#                                — поднять стек (на пустом клоне — bootstrap:
+#                                  весь конвейер установки); на развёрнутом —
+#                                  автозапуск вкл + поднять сейчас
 #   use <profile>                — переключить профиль (+recreate, заменяет
 #                                  конфиг автозапуска; недостающие модели
 #                                  докачиваются с вопросом)
@@ -17,9 +21,12 @@
 #                                  Логи; клавиши q, +/-, p — пауза логов),
 #                                  в пайп/файле — строка полного среза
 #                                  раз в N c (дефолт 2)
-#   on | off                     — автозапуск вкл / выкл (off = стоп + снятие
-#                                  с автозапуска; файлы/модели/образ целы)
+#   off                          — стоп + снятие с автозапуска (файлы/модели/
+#                                  образ целы)
 #   uninstall [--purge-models] [--purge-image]
+#                                — снять привязки к машине (юниты, контейнер/
+#                                  сеть, linger, limits.d); клон, .data/
+#                                  (модели/профили) и симлинк остаются
 #   bench [full] [--runs N] [--parallel N[,M…]] [--out DIR] [--json] [--compare [FILE]] [--fresh]
 # === USAGE-END ===
 set -euo pipefail
@@ -34,13 +41,18 @@ set -euo pipefail
 # ── конфигурация (env переопределяет) ───────────────────────────────────────
 # @type /^[\w./-]+:[\w.-]+$/ IMAGE="${HFCTL_IMAGE:-ghcr.io/warpfront/hipfire:0.4.7}" # образ ghcr с тегом; переопределение — env HFCTL_IMAGE
 IMAGE="${HFCTL_IMAGE:-ghcr.io/warpfront/hipfire:0.4.7}"
-STACK_DIR="${HFCTL_DIR:-$HOME/hipfire}"          # всё инсталляция здесь (compose, .env, бинарь)
-MODELS_BASE="${HFCTL_MODELS:-$STACK_DIR/models}" # база моделей; внутри — каталог-сет на профиль
+SELF="$(readlink -f "$0")"                       # диспетчер: реальный путь файла
+# Лейаут v2 (этап 14): клон = стек = место запуска; STACK_DIR от диспетчера,
+# cwd не читается — запуск работает из любого подкаталога клона; env-крючок
+# HFCTL_DIR — selfcheck/миграция (прод не задаёт).
+STACK_DIR="${HFCTL_DIR:-$(dirname "$SELF")}"     # клон = стек (код, .env, .data/)
+DATA_DIR="$STACK_DIR/.data"                      # ВСЁ машинное состояние (gitignored)
+MODELS_BASE="${HFCTL_MODELS:-$DATA_DIR/models}"  # база моделей; внутри — каталог-сет на профиль
 MODELS_DIR="$MODELS_BASE/27b"                    # маунт; пересчитывается set_models_dir()
 # per-профиль state-каталоги (этап 7): config (home движка: конфиг, disk-тир
 # кэша, pid) и kernel (кэш прекомпилированных ядер). Bind вместо named
 # volumes — состояние явное, per-профиль по конструкции, backup = tar.
-STATE_BASE="${HFCTL_STATE:-$STACK_DIR/profiles}"
+STATE_BASE="${HFCTL_STATE:-$DATA_DIR/profiles}"
 # @type /^\d+$/              PORT="${HFCTL_PORT:-11435}"                             # TCP-порт; переопределение — env HFCTL_PORT
 PORT="${HFCTL_PORT:-11435}"
 # @type /^[\d.]+$/           BIND="${HFCTL_BIND:-0.0.0.0}"                           # адрес bind; переопределение — env HFCTL_BIND
@@ -54,8 +66,7 @@ SLOTS="${HFCTL_SLOTS:-2}"                        # слотов в 27b-slots (4�
 CONTAINER=hipfire_hipfire_1
 # @type systemd_unit         UNIT_NAME=hipfire-compose                               # базовое имя user-юнитов (+…-watchdog.*)
 UNIT_NAME=hipfire-compose
-STOP_MARKER="$STACK_DIR/.hfctl-stopped"   # явная остановка: вотчдог не встаёт
-SELF="$(readlink -f "$0")"
+STOP_MARKER="$DATA_DIR/.hfctl-stopped"   # явная остановка: вотчдог не встаёт
 MAX_SEQ=262144
 MEMLOCK=1318060032
 LIB_DIR="$(cd "$(dirname "$SELF")" && pwd)/lib"  # дерево = рядом с диспетчером
@@ -163,11 +174,11 @@ isint() { case "$1" in ''|*[!0-9]*) return 1 ;; *) return 0 ;; esac; }
 source "$LIB_DIR/profiles.sh"     # table+resolve+gates (нужны только env-константы)
 source "$LIB_DIR/stack.sh"        # CF/compose/env_val/cur_profile/preflight (нужны log/warn/die)
 source "$LIB_DIR/state.sh"        # каталоги моделей по сетам
-source "$LIB_DIR/stack_files.sh"  # render_tpl, sync_tree, write_stack_files, write_env
+source "$LIB_DIR/stack_files.sh"  # render_tpl, write_stack_files, write_env
 source "$LIB_DIR/engine.sh"       # cfgset/apply_profile
 source "$LIB_DIR/health.sh"       # wait_health/smoke/check_route
 source "$LIB_DIR/models.sh"       # pull*
-source "$LIB_DIR/commands.sh"     # install/use/status/…/uninstall
+source "$LIB_DIR/commands.sh"     # bootstrap/use/status/…/uninstall
 source "$LIB_DIR/autostart.sh"    # on/off/up/down/_boot/_watchdog
 source "$LIB_DIR/bench.sh"        # bench (использует всё выше)
 
@@ -202,17 +213,17 @@ usage() {
 # Ограничения/допущения: работает в верхнеуровневом скоупе диспетчера под
 #   set -euo pipefail: `shift || true` легализует запуск без аргументов;
 #   скрытые алиасы: up|down|mode → cmd_up/cmd_down/cmd_mode (autostart.sh),
-#   autostart|noautostart → cmd_on|cmd_off, _boot|_watchdog — внутренние
-#   команды systemd-юнитов (autostart.sh); PROFILE_LIST в отказной ветке —
-#   из profiles.sh.
+#   autostart|noautostart → cmd_on|cmd_off, install → cmd_on (лейаут v1;
+#   этап 14 упразднил фазу install — bootstrap живёт в первом `hfctl on`),
+#   _boot|_watchdog — внутренние команды systemd-юнитов (autostart.sh);
+#   PROFILE_LIST в отказной ветке — из profiles.sh.
 #
 # @param 1: string      # имя команды (см. usage; '' → usage)
 # @param 2..N: string[] # аргументы команды — передаются как есть ("$@")
 cmd="${1:-}"; shift || true
 case "$cmd" in
-  install)      cmd_install "$@" ;;
   use)          cmd_use "$@" ;;
-  on)           cmd_on ;;
+  on)           cmd_on "$@" ;;
   off)          cmd_off ;;
   status)       cmd_status "$@" ;;
   logs)         cmd_logs "$@" ;;
@@ -226,10 +237,11 @@ case "$cmd" in
   mode)         cmd_mode "$@" ;;   # скрытый алиас
   autostart)    cmd_on ;;          # скрытый алиас
   noautostart)  cmd_off ;;         # скрытый алиас
+  install)      cmd_on "$@" ;;     # скрытый алиас (лейаут v1; bootstrap теперь в on)
   _watchdog)    cmd_watchdog ;;
   _boot)        cmd_boot ;;
   uninstall)    cmd_uninstall "$@" ;;
   "")           usage; exit 1 ;;  # bare-вызов: usage и отказ rc=1
-  *)            echo "неизвестная команда '$cmd'. Команды: install | use <profile> | status [--json] | logs | watch | on | off | doctor | models | pull <profile> | bench [full] | uninstall" \
+  *)            echo "неизвестная команда '$cmd'. Команды: use <profile> | status [--json] | logs | watch | on | off | doctor | models | pull <profile> | bench [full] | uninstall" \
                   " (алиасы: up|down|mode|autostart|noautostart). Профили: $PROFILE_LIST" >&2; exit 1 ;;
 esac

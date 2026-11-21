@@ -12,15 +12,17 @@ CF=( -f compose.yml -f compose.halo.yml -f compose.local.yml )
 #   (CF: compose.yml + compose.halo.yml + compose.local.yml) с рабочим
 #   каталогом $STACK_DIR — podman-compose не читает COMPOSE_FILE, поэтому
 #   -f перечисляются при каждом вызове (здесь и собрано это «каждом»).
-#   При наличии $STACK_DIR/.hfctl-containers.conf — CONTAINERS_CONF скоупится
-#   на стек (slirp4netns вместо pasta, обход AppArmor-бага teardown netns,
-#   §14 SPEC); файла нет (старый стек до обновления) → env чист, поведение
-#   как прежде. Глобальный ~/.config/containers не трогается никогда.
+#   При наличии tracked-файла клона $STACK_DIR/tpl/etc/hfctl-containers.conf
+#   — CONTAINERS_CONF скоупится на стек (slirp4netns вместо pasta, обход
+#   AppArmor-бага teardown netns, §14; лейаут v2/этап 14: производной копии
+#   нет, потребители читают tpl-файл напрямую). Файла нет (кривое дерево
+#   клона) → env чист, поведение как прежде. Глобальный ~/.config/containers
+#   не трогается никогда.
 #
 # Побочные эффекты: всё, что делает podman compose подкоманда: lifecycle
 #   контейнеров и томов (up/stop/down), одноразовые run-контейнеры, подтяжка
 #   образа, чтение compose-троек из $STACK_DIR; экспорт CONTAINERS_CONF в
-#   окружение субшелла (только когда файл стека на месте). cwd вызывающего
+#   окружение субшелла (только когда tracked-файл на месте). cwd вызывающего
 #   не меняется (cd выполняется в субшелле).
 #
 # Ограничения/допущения: требуются глобал STACK_DIR (диспетчер) и CF этого
@@ -37,8 +39,9 @@ CF=( -f compose.yml -f compose.halo.yml -f compose.local.yml )
 #   сливают вызывающие через 2>&1)
 # @returns integer   # rc podman compose либо rc cd при недоступном STACK_DIR
 compose() { ( cd "$STACK_DIR" || exit
-  # скоуп containers.conf только для стека (файл нет → env чист, как прежде)
-  if [ -f "$STACK_DIR/.hfctl-containers.conf" ]; then export CONTAINERS_CONF="$STACK_DIR/.hfctl-containers.conf"; fi   # fix:containers-conf
+  # скоуп containers.conf только для стека (§14): tracked-файл клона —
+  # существует всегда (инвариант «conf до подъёма» выполняется фактом клона)
+  if [ -f "$STACK_DIR/tpl/etc/hfctl-containers.conf" ]; then export CONTAINERS_CONF="$STACK_DIR/tpl/etc/hfctl-containers.conf"; fi   # fix:containers-conf
   podman compose "${CF[@]}" "$@" ); }
 
 # Назначение: значение ключа из $STACK_DIR/.env — первая строка вида
